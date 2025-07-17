@@ -16,9 +16,6 @@ REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://hitster-randomizer.onr
 MONGO_URI = os.getenv('MONGO_URI')
 if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
-AUTH_CODE_ACCESS_TOKEN = None
-REFRESH_TOKEN = None
-CLIENT_CREDENTIALS_ACCESS_TOKEN = None
 
 # MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
@@ -28,27 +25,25 @@ sessions = db['sessions']
 # Playlist configuration
 THEME_PLAYLISTS = {
     'hitster_uk': '2hZhVv7z6cpGcRBEgvlXLz',
-    'hebrew_hits': '37i9dQZF1DX5uM2K3k2o0Y'
+    'hebrew_hits': '37i9dQZF1DX5uM2K3k2o0Y',
+    'sarit_hadad': '37i9dQZF1DX7Mxx46Fj5y4'
 }
 
 # Get Client Credentials access token
 def get_client_credentials_token():
-    global CLIENT_CREDENTIALS_ACCESS_TOKEN
     try:
         response = requests.post(
             'https://accounts.spotify.com/api/token',
             data={'grant_type': 'client_credentials', 'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET}
         )
         response.raise_for_status()
-        CLIENT_CREDENTIALS_ACCESS_TOKEN = response.json().get('access_token')
-        return CLIENT_CREDENTIALS_ACCESS_TOKEN
+        return response.json().get('access_token')
     except requests.RequestException as e:
         print(f"Error getting client credentials token: {e}")
         return None
 
 # Refresh Authorization Code access token
 def refresh_access_token(session_id):
-    global AUTH_CODE_ACCESS_TOKEN, REFRESH_TOKEN
     session = sessions.find_one({'_id': ObjectId(session_id)})
     if not session or not session.get('spotify_refresh_token'):
         print("Error: No refresh token available")
@@ -65,12 +60,11 @@ def refresh_access_token(session_id):
         )
         response.raise_for_status()
         data = response.json()
-        AUTH_CODE_ACCESS_TOKEN = data.get('access_token')
         expires_in = data.get('expires_in', 3600)
         sessions.update_one(
             {'_id': ObjectId(session_id)},
             {'$set': {
-                'spotify_access_token': AUTH_CODE_ACCESS_TOKEN,
+                'spotify_access_token': data.get('access_token'),
                 'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in)
             }}
         )
@@ -82,10 +76,8 @@ def refresh_access_token(session_id):
 
 # Fetch tracks from a playlist
 def get_playlist_tracks(theme, session_id):
-    global CLIENT_CREDENTIALS_ACCESS_TOKEN
-    if not CLIENT_CREDENTIALS_ACCESS_TOKEN:
-        CLIENT_CREDENTIALS_ACCESS_TOKEN = get_client_credentials_token()
-    if not CLIENT_CREDENTIALS_ACCESS_TOKEN:
+    token = get_client_credentials_token()
+    if not token:
         return []
     playlist_id = THEME_PLAYLISTS.get(theme)
     if not playlist_id:
@@ -95,7 +87,7 @@ def get_playlist_tracks(theme, session_id):
     try:
         response = requests.get(
             f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=50',
-            headers={'Authorization': f'Bearer {CLIENT_CREDENTIALS_ACCESS_TOKEN}'}
+            headers={'Authorization': f'Bearer {token}'}
         )
         response.raise_for_status()
         tracks = [item['track'] for item in response.json()['items'] if item['track'] and item['track']['id']]
@@ -177,7 +169,6 @@ def spotify_authorize():
 
 @app.route('/api/spotify/callback')
 def spotify_callback():
-    global AUTH_CODE_ACCESS_TOKEN, REFRESH_TOKEN
     code = request.args.get('code')
     state = request.args.get('state')
     if not code or state != 'xyz123':
@@ -195,12 +186,10 @@ def spotify_callback():
         )
         response.raise_for_status()
         data = response.json()
-        AUTH_CODE_ACCESS_TOKEN = data.get('access_token')
-        REFRESH_TOKEN = data.get('refresh_token')
         expires_in = data.get('expires_in', 3600)
         session = sessions.insert_one({
-            'spotify_access_token': AUTH_CODE_ACCESS_TOKEN,
-            'spotify_refresh_token': REFRESH_TOKEN,
+            'spotify_access_token': data.get('access_token'),
+            'spotify_refresh_token': data.get('refresh_token'),
             'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in),
             'tracks_played': [],
             'is_active': True,
