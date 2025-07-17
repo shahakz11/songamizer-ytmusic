@@ -1,5 +1,6 @@
 import os
 from flask import Flask, request, jsonify, redirect
+from flask_cors import CORS
 import requests
 import random
 from urllib.parse import urlencode
@@ -8,6 +9,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Replace with Base44 URL if known
 
 # Configuration from environment variables
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
@@ -25,8 +27,8 @@ sessions = db['sessions']
 # Playlist configuration
 THEME_PLAYLISTS = {
     'hitster_uk': '2hZhVv7z6cpGcRBEgvlXLz',
-    'hebrew_hits': '37i9dQZF1DX5uM2K3k2o0Y',
-    'sarit_hadad': '37i9dQZF1DX7Mxx46Fj5y4'
+    'hebrew_hits': '6q2dtkU2I1tR8ZVQI8mian',
+    'sarit_hadad': '1CuvouZI8iUDCdWCnbqfuf'
 }
 
 # Get Client Credentials access token
@@ -39,7 +41,7 @@ def get_client_credentials_token():
         response.raise_for_status()
         return response.json().get('access_token')
     except requests.RequestException as e:
-        print(f"Error getting client credentials token: {e}")
+        print(f"Error getting client credentials token: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return None
 
 # Refresh Authorization Code access token
@@ -71,30 +73,64 @@ def refresh_access_token(session_id):
         print(f"Refreshed access token for session {session_id}")
         return True
     except requests.RequestException as e:
-        print(f"Error refreshing access token: {e}")
+        print(f"Error refreshing access token: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return False
 
-# Fetch tracks from a playlist
+# Fetch tracks from a playlist with pagination
 def get_playlist_tracks(theme, session_id):
     token = get_client_credentials_token()
     if not token:
+        print(f"Error: No client credentials token for {theme}")
         return []
     playlist_id = THEME_PLAYLISTS.get(theme)
     if not playlist_id:
+        print(f"Error: Invalid playlist theme {theme}")
         return []
     session = sessions.find_one({'_id': ObjectId(session_id)})
     played_track_ids = session.get('tracks_played', []) if session else []
-    try:
-        response = requests.get(
-            f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=50',
-            headers={'Authorization': f'Bearer {token}'}
+    tracks = []
+    offset = 0
+    limit = 50
+    while True:
+        try:
+            response = requests.get(
+                f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit={limit}&offset={offset}',
+                headers={'Authorization': f'Bearer {token}'}
+            )
+            if response.status_code == 401:
+                token = get_client_credentials_token()
+                if not token:
+                    print(f"Error: Failed to refresh client credentials token for {theme}")
+                    return []
+                response = requests.get(
+                    f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit={limit}&offset={offset}',
+                    headers={'Authorization': f'Bearer {token}'}
+                )
+            response.raise_for_status()
+            data = response.json()
+            if 'items' not in data:
+                print(f"Error: No 'items' in response for {theme}, Response: {data}")
+                return []
+            new_tracks = [item['track'] for item in data['items'] if item['track'] and item['track']['id']]
+            tracks.extend(new_tracks)
+            if len(data['items']) < limit:
+                break
+            offset += limit
+        except requests.RequestException as e:
+            print(f"Error fetching tracks for {theme} at offset {offset}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+            return []
+    unplayed_tracks = [track for track in tracks if track['id'] not in played_track_ids]
+    if not unplayed_tracks and tracks:
+        # Reset tracks_played if all tracks have been played
+        sessions.update_one(
+            {'_id': ObjectId(session_id)},
+            {'$set': {'tracks_played': []}}
         )
-        response.raise_for_status()
-        tracks = [item['track'] for item in response.json()['items'] if item['track'] and item['track']['id']]
-        return [track for track in tracks if track['id'] not in played_track_ids]
-    except requests.RequestException as e:
-        print(f"Error fetching tracks for {theme}: {e}")
-        return []
+        print(f"Reset tracks_played for session {session_id} as all tracks were played for {theme}")
+        return tracks
+    if not unplayed_tracks:
+        print(f"No unplayed tracks for {theme}, Total tracks: {len(tracks)}, Played tracks: {len(played_track_ids)}")
+    return unplayed_tracks
 
 # Check for active Spotify devices
 def get_active_device(session_id):
@@ -122,7 +158,7 @@ def get_active_device(session_id):
                 return device['id'], None
         return devices[0]['id'] if devices else None, "No active devices found. Open Spotify and play/pause a track."
     except requests.RequestException as e:
-        print(f"Error checking devices: {e}")
+        print(f"Error checking devices: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return None, f"Error checking devices: {str(e)}"
 
 # Play a track
@@ -152,6 +188,7 @@ def play_track(track_id, session_id):
         print(f"Play request status: {response.status_code}, Response: {response.text}")
         return response.status_code == 204, None
     except requests.RequestException as e:
+        print(f"Error playing track {track_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return False, f"Error playing track {track_id}: {str(e)}"
 
 @app.route('/api/spotify/authorize')
@@ -200,6 +237,7 @@ def spotify_callback():
             'session_id': str(session.inserted_id)
         }), 200
     except requests.RequestException as e:
+        print(f"Error in spotify_callback: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return jsonify({'error': f'Failed to exchange code: {str(e)}'}), 400
 
 @app.route('/api/spotify/playlists')
@@ -230,14 +268,14 @@ def play_next_song(theme):
     if not session:
         return jsonify({'error': 'Invalid session_id'}), 400
     if theme not in THEME_PLAYLISTS:
-        return jsonify({'error': 'Invalid theme'}), 400
+        return jsonify({'error': f'Invalid theme: {theme}'}), 400
     sessions.update_one(
         {'_id': ObjectId(session_id)},
         {'$set': {'playlist_theme': theme}}
     )
     tracks = get_playlist_tracks(theme, session_id)
     if not tracks:
-        return jsonify({'error': 'No tracks available'}), 400
+        return jsonify({'error': f'No tracks available for {theme}. Playlist may be empty or inaccessible.'}), 400
     random_track = random.choice(tracks)
     success, error = play_track(random_track['id'], session_id)
     if success:
