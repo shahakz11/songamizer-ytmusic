@@ -11,8 +11,10 @@ app = Flask(__name__)
 # Configuration from environment variables
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET', 'a65c11eca47346e0bee9ba261d7e3126')
-REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://hitster-randomizer.onrender.com/api/spotify/callback')
-MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017')
+REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:5000/api/spotify/callback')
+MONGO_URI = os.getenv('MONGO_URI')
+if not MONGO_URI:
+    raise ValueError("MONGO_URI environment variable not set")
 AUTH_CODE_ACCESS_TOKEN = None
 REFRESH_TOKEN = None
 CLIENT_CREDENTIALS_ACCESS_TOKEN = None
@@ -185,8 +187,11 @@ def spotify_callback():
         data = response.json()
         AUTH_CODE_ACCESS_TOKEN = data.get('access_token')
         REFRESH_TOKEN = data.get('refresh_token')
-        # Create a new session in MongoDB
-        session = sessions.insert_one({'played_track_ids': []})
+        session = sessions.insert_one({
+            'played_track_ids': [],
+            'access_token': AUTH_CODE_ACCESS_TOKEN,
+            'refresh_token': REFRESH_TOKEN
+        })
         return jsonify({
             'message': 'Authorization successful',
             'access_token': AUTH_CODE_ACCESS_TOKEN,
@@ -204,6 +209,11 @@ def play_next_song(theme):
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({'error': 'Session ID required'}), 400
+    session = sessions.find_one({'_id': ObjectId(session_id)})
+    if not session:
+        return jsonify({'error': 'Invalid session_id'}), 400
+    global AUTH_CODE_ACCESS_TOKEN
+    AUTH_CODE_ACCESS_TOKEN = session.get('access_token')
     if theme not in THEME_PLAYLISTS:
         return jsonify({'error': 'Invalid theme'}), 400
     tracks = get_playlist_tracks(theme, session_id)
@@ -211,7 +221,6 @@ def play_next_song(theme):
         return jsonify({'error': 'No tracks available'}), 400
     random_track = random.choice(tracks)
     if play_track(random_track['id']):
-        # Update session in MongoDB
         sessions.update_one(
             {'_id': ObjectId(session_id)},
             {'$push': {'played_track_ids': random_track['id']}}
