@@ -9,7 +9,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # Replace with Base44 URL if known
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow Base44 domain
 
 # Configuration from environment variables
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
@@ -27,8 +27,7 @@ sessions = db['sessions']
 # Playlist configuration
 THEME_PLAYLISTS = {
     'hitster_uk': '2hZhVv7z6cpGcRBEgvlXLz',
-    'hebrew_hits': '6q2dtkU2I1tR8ZVQI8mian',
-    'sarit_hadad': '1CuvouZI8iUDCdWCnbqfuf'
+    'hebrew_hits': '6q2dtkU2I1tR8ZVQI8mian'
 }
 
 # Get Client Credentials access token
