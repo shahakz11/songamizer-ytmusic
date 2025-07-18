@@ -9,7 +9,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow Base44 domain
+CORS(app, resources={r"/api/*": {"origins": ["https://preview--tune-twist-7ca04c74.base44.app", "*"]}})
 
 # Configuration from environment variables
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
@@ -23,6 +23,7 @@ if not MONGO_URI:
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client['hitster']
 sessions = db['sessions']
+tracks = db['tracks']  # New collection for tracks
 
 # Playlist configuration
 THEME_PLAYLISTS = {
@@ -120,7 +121,6 @@ def get_playlist_tracks(theme, session_id):
             return []
     unplayed_tracks = [track for track in tracks if track['id'] not in played_track_ids]
     if not unplayed_tracks and tracks:
-        # Reset tracks_played if all tracks have been played
         sessions.update_one(
             {'_id': ObjectId(session_id)},
             {'$set': {'tracks_played': []}}
@@ -229,7 +229,8 @@ def spotify_callback():
             'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in),
             'tracks_played': [],
             'is_active': True,
-            'playlist_theme': None
+            'playlist_theme': None,
+            'created_at': datetime.utcnow().isoformat()
         })
         return jsonify({
             'message': 'Authorization successful',
@@ -248,61 +249,113 @@ def get_session():
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({'error': 'Session ID required'}), 400
-    session = sessions.find_one({'_id': ObjectId(session_id)})
-    if not session:
-        return jsonify({'error': 'Invalid session_id'}), 400
-    return jsonify({
-        'session_id': str(session['_id']),
-        'playlist_theme': session.get('playlist_theme'),
-        'tracks_played': session.get('tracks_played', []),
-        'is_active': session.get('is_active', True)
-    })
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            return jsonify({'error': 'Invalid session_id'}), 400
+        return jsonify({
+            'session_id': str(session['_id']),
+            'playlist_theme': session.get('playlist_theme'),
+            'tracks_played': session.get('tracks_played', []),
+            'is_active': session.get('is_active', True),
+            'created_at': session.get('created_at')
+        })
+    except Exception as e:
+        print(f"Error in get_session: {e}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/spotify/tracks')
+def get_tracks():
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return jsonify({'error': 'Session ID required'}), 400
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            return jsonify({'error': 'Invalid session_id'}), 400
+        track_ids = session.get('tracks_played', [])
+        track_data = []
+        for track_id in track_ids:
+            track = tracks.find_one({'spotify_id': track_id, 'session_id': str(session['_id'])})
+            if track:
+                track_data.append({
+                    'spotify_id': track['spotify_id'],
+                    'title': track['title'],
+                    'artist': track['artist'],
+                    'album': track['album'],
+                    'release_year': track['release_year'],
+                    'playlist_theme': track['playlist_theme'],
+                    'played_at': track['played_at']
+                })
+        return jsonify(track_data)
+    except Exception as e:
+        print(f"Error in get_tracks: {e}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/play-track/<theme>')
 def play_next_song(theme):
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({'error': 'Session ID required'}), 400
-    session = sessions.find_one({'_id': ObjectId(session_id)})
-    if not session:
-        return jsonify({'error': 'Invalid session_id'}), 400
-    if theme not in THEME_PLAYLISTS:
-        return jsonify({'error': f'Invalid theme: {theme}'}), 400
-    sessions.update_one(
-        {'_id': ObjectId(session_id)},
-        {'$set': {'playlist_theme': theme}}
-    )
-    tracks = get_playlist_tracks(theme, session_id)
-    if not tracks:
-        return jsonify({'error': f'No tracks available for {theme}. Playlist may be empty or inaccessible.'}), 400
-    random_track = random.choice(tracks)
-    success, error = play_track(random_track['id'], session_id)
-    if success:
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            return jsonify({'error': 'Invalid session_id'}), 400
+        if theme not in THEME_PLAYLISTS:
+            return jsonify({'error': f'Invalid theme: {theme}'}), 400
         sessions.update_one(
             {'_id': ObjectId(session_id)},
-            {'$push': {'tracks_played': random_track['id']}}
+            {'$set': {'playlist_theme': theme}}
         )
-        return jsonify({
-            'spotify_id': random_track['id'],
-            'title': random_track['name'],
-            'artist': random_track['artists'][0]['name'],
-            'release_year': int(random_track['album']['release_date'].split('-')[0]),
-            'album': random_track['album']['name'],
-            'playlist_theme': theme,
-            'played_at': datetime.utcnow().isoformat()
-        })
-    return jsonify({'error': error or 'Failed to play track. Ensure Spotify is open on a device and your account is Premium.'}), 400
+        tracks_list = get_playlist_tracks(theme, session_id)
+        if not tracks_list:
+            return jsonify({'error': f'No tracks available for {theme}. Playlist may be empty or inaccessible.'}), 400
+        random_track = random.choice(tracks_list)
+        success, error = play_track(random_track['id'], session_id)
+        if success:
+            tracks.insert_one({
+                'spotify_id': random_track['id'],
+                'title': random_track['name'],
+                'artist': random_track['artists'][0]['name'],
+                'release_year': int(random_track['album']['release_date'].split('-')[0]),
+                'album': random_track['album']['name'],
+                'playlist_theme': theme,
+                'played_at': datetime.utcnow().isoformat(),
+                'session_id': str(session['_id'])
+            })
+            sessions.update_one(
+                {'_id': ObjectId(session_id)},
+                {'$push': {'tracks_played': random_track['id']}}
+            )
+            return jsonify({
+                'spotify_id': random_track['id'],
+                'title': random_track['name'],
+                'artist': random_track['artists'][0]['name'],
+                'release_year': int(random_track['album']['release_date'].split('-')[0]),
+                'album': random_track['album']['name'],
+                'playlist_theme': theme,
+                'played_at': datetime.utcnow().isoformat()
+            })
+        return jsonify({'error': error or 'Failed to play track. Ensure Spotify is open on a device and your account is Premium.'}), 400
+    except Exception as e:
+        print(f"Error in play_next_song: {e}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/reset', methods=['POST'])
 def reset_game():
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({'error': 'Session ID required'}), 400
-    sessions.update_one(
-        {'_id': ObjectId(session_id)},
-        {'$set': {'tracks_played': [], 'playlist_theme': None}}
-    )
-    return jsonify({'message': 'Game session reset'}), 200
+    try:
+        sessions.update_one(
+            {'_id': ObjectId(session_id)},
+            {'$set': {'tracks_played': [], 'playlist_theme': None}}
+        )
+        tracks.delete_many({'session_id': session_id})
+        return jsonify({'message': 'Game session reset'}), 200
+    except Exception as e:
+        print(f"Error in reset_game: {e}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/')
 def index():
