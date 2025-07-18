@@ -15,6 +15,7 @@ CORS(app, resources={r"/api/*": {"origins": ["https://preview--tune-twist-7ca04c
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET', 'a65c11eca47346e0bee9ba261d7e3126')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://hitster-randomizer.onrender.com/api/spotify/callback')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://preview--tune-twist-7ca04c74.base44.app')
 MONGO_URI = os.getenv('MONGO_URI')
 if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
@@ -23,7 +24,7 @@ if not MONGO_URI:
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client['hitster']
 sessions = db['sessions']
-tracks = db['tracks']  # New collection for tracks
+tracks = db['tracks']
 
 # Playlist configuration
 THEME_PLAYLISTS = {
@@ -207,8 +208,13 @@ def spotify_authorize():
 def spotify_callback():
     code = request.args.get('code')
     state = request.args.get('state')
+    error = request.args.get('error')
+    if error:
+        print(f"Spotify authorization error: {error}")
+        return redirect(f"{FRONTEND_URL}?error={urlencode({'error': error})}")
     if not code or state != 'xyz123':
-        return jsonify({'error': 'Invalid code or state'}), 400
+        print("Invalid code or state")
+        return redirect(f"{FRONTEND_URL}?error={urlencode({'error': 'Invalid code or state'})}")
     try:
         response = requests.post(
             'https://accounts.spotify.com/api/token',
@@ -232,13 +238,12 @@ def spotify_callback():
             'playlist_theme': None,
             'created_at': datetime.utcnow().isoformat()
         })
-        return jsonify({
-            'message': 'Authorization successful',
-            'session_id': str(session.inserted_id)
-        }), 200
+        session_id = str(session.inserted_id)
+        print(f"Generated session_id: {session_id}")
+        return redirect(f"{FRONTEND_URL}?session_id={session_id}")
     except requests.RequestException as e:
         print(f"Error in spotify_callback: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return jsonify({'error': f'Failed to exchange code: {str(e)}'}), 400
+        return redirect(f"{FRONTEND_URL}?error={urlencode({'error': f'Failed to exchange code: {str(e)}'})}")
 
 @app.route('/api/spotify/playlists')
 def get_playlists():
