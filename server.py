@@ -49,7 +49,7 @@ def get_client_credentials_token():
 def refresh_access_token(session_id):
     session = sessions.find_one({'_id': ObjectId(session_id)})
     if not session or not session.get('spotify_refresh_token'):
-        print("Error: No refresh token available")
+        print(f"Error: No refresh token for session {session_id}")
         return False
     try:
         response = requests.post(
@@ -74,7 +74,7 @@ def refresh_access_token(session_id):
         print(f"Refreshed access token for session {session_id}")
         return True
     except requests.RequestException as e:
-        print(f"Error refreshing access token: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+        print(f"Error refreshing access token for {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return False
 
 # Fetch tracks from a playlist with pagination
@@ -158,7 +158,7 @@ def get_active_device(session_id):
                 return device['id'], None
         return devices[0]['id'] if devices else None, "No active devices found. Open Spotify and play/pause a track."
     except requests.RequestException as e:
-        print(f"Error checking devices: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+        print(f"Error checking devices for session {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return None, f"Error checking devices: {str(e)}"
 
 # Play a track
@@ -168,7 +168,7 @@ def play_track(track_id, session_id):
         return False, "Error: No access token set"
     device_id, error = get_active_device(session_id)
     if not device_id:
-        return False, error or "Error: No active Spotify device found"
+        return False, error or "Error: No active Spotify device found. Open Spotify and play/pause a track."
     try:
         response = requests.put(
             'https://api.spotify.com/v1/me/player/play',
@@ -185,15 +185,17 @@ def play_track(track_id, session_id):
                 )
             else:
                 return False, "Failed to refresh access token"
-        print(f"Play request status: {response.status_code}, Response: {response.text}")
+        if response.status_code == 403:
+            return False, "Premium account required to play tracks."
+        print(f"Play request status for session {session_id}: {response.status_code}, Response: {response.text}")
         return response.status_code == 204, None
     except requests.RequestException as e:
-        print(f"Error playing track {track_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return False, f"Error playing track {track_id}: {str(e)}"
+        print(f"Error playing track {track_id} for session {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+        return False, f"Error playing track: {str(e)}"
 
 @app.route('/api/spotify/authorize')
 def spotify_authorize():
-    state = 'xyz123'
+    state = str(random.randint(100000, 999999))  # Unique state per request
     params = {
         'client_id': CLIENT_ID,
         'response_type': 'code',
@@ -201,7 +203,13 @@ def spotify_authorize():
         'state': state,
         'scope': 'streaming user-read-playback-state user-modify-playback-state'
     }
+    sessions.insert_one({
+        'state': state,
+        'created_at': datetime.utcnow().isoformat(),
+        'is_active': False
+    })
     auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+    print(f"Authorizing with state: {state}")
     return redirect(auth_url)
 
 @app.route('/api/spotify/callback')
@@ -212,9 +220,13 @@ def spotify_callback():
     if error:
         print(f"Spotify authorization error: {error}")
         return redirect(f"{FRONTEND_URL}?error={urlencode({'error': error})}")
-    if not code or state != 'xyz123':
+    if not code or not state:
         print("Invalid code or state")
         return redirect(f"{FRONTEND_URL}?error={urlencode({'error': 'Invalid code or state'})}")
+    session = sessions.find_one({'state': state, 'is_active': False})
+    if not session:
+        print(f"Invalid or used state: {state}")
+        return redirect(f"{FRONTEND_URL}?error={urlencode({'error': 'Invalid or expired state'})}")
     try:
         response = requests.post(
             'https://accounts.spotify.com/api/token',
@@ -229,17 +241,21 @@ def spotify_callback():
         response.raise_for_status()
         data = response.json()
         expires_in = data.get('expires_in', 3600)
-        session = sessions.insert_one({
-            'spotify_access_token': data.get('access_token'),
-            'spotify_refresh_token': data.get('refresh_token'),
-            'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in),
-            'tracks_played': [],
-            'is_active': True,
-            'playlist_theme': None,
-            'created_at': datetime.utcnow().isoformat()
-        })
-        session_id = str(session.inserted_id)
-        print(f"Generated session_id: {session_id}")
+        session_id = str(ObjectId())
+        sessions.update_one(
+            {'_id': session['_id']},
+            {'$set': {
+                'spotify_access_token': data.get('access_token'),
+                'spotify_refresh_token': data.get('refresh_token'),
+                'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in),
+                'tracks_played': [],
+                'is_active': True,
+                'playlist_theme': None,
+                'created_at': datetime.utcnow().isoformat(),
+                'state': None
+            }}
+        )
+        print(f"Generated session_id: {session_id} for state: {state}")
         return redirect(f"{FRONTEND_URL}?session_id={session_id}")
     except requests.RequestException as e:
         print(f"Error in spotify_callback: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
@@ -266,7 +282,7 @@ def get_session():
             'created_at': session.get('created_at')
         })
     except Exception as e:
-        print(f"Error in get_session: {e}")
+        print(f"Error in get_session for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/tracks')
@@ -294,7 +310,7 @@ def get_tracks():
                 })
         return jsonify(track_data)
     except Exception as e:
-        print(f"Error in get_tracks: {e}")
+        print(f"Error in get_tracks for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/play-track/<theme>')
@@ -343,7 +359,7 @@ def play_next_song(theme):
             })
         return jsonify({'error': error or 'Failed to play track. Ensure Spotify is open on a device and your account is Premium.'}), 400
     except Exception as e:
-        print(f"Error in play_next_song: {e}")
+        print(f"Error in play_next_song for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/reset', methods=['POST'])
@@ -359,7 +375,8 @@ def reset_game():
         tracks.delete_many({'session_id': session_id})
         return jsonify({'message': 'Game session reset'}), 200
     except Exception as e:
-        print(f"Error in reset_game: {e}")
+        print(f"Error in reset_game for {session_id}: {e}")
+        returnincorporate
         return jsonify({'error': str(e)}), 400
 
 @app.route('/')
