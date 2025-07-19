@@ -288,7 +288,8 @@ def spotify_authorize():
         session_id = str(sessions.insert_one({
             'state': state,
             'created_at': datetime.utcnow().isoformat(),
-            'is_active': False
+            'is_active': False,
+            'user_playlists': list(DEFAULT_PLAYLISTS.values())  # Initialize here
         }).inserted_id)
         logger.info(f"Authorizing with state: {state}, session_id: {session_id}")
         auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
@@ -341,7 +342,7 @@ def spotify_callback():
                 'tracks_played': [],
                 'is_active': True,
                 'playlist_theme': None,
-                'user_playlists': list(DEFAULT_PLAYLISTS.values()),
+                'user_playlists': session.get('user_playlists', list(DEFAULT_PLAYLISTS.values())),  # Preserve existing or set default
                 'created_at': datetime.utcnow().isoformat(),
                 'state': None
             }}
@@ -351,6 +352,12 @@ def spotify_callback():
         if not session or not session.get('is_active'):
             logger.error(f"Session {session_id} not updated correctly, session: {session}")
             return redirect(f"{FRONTEND_URL}?error={urlencode({'error': 'Session update failed'})}")
+        if not session.get('user_playlists'):
+            logger.warning(f"Session {session_id} missing user_playlists, setting default")
+            sessions.update_one(
+                {'_id': ObjectId(session_id)},
+                {'$set': {'user_playlists': list(DEFAULT_PLAYLISTS.values())}}
+            )
         logger.info(f"Callback success: session_id={session_id}, state={state}")
         return redirect(f"{FRONTEND_URL}?session_id={session_id}")
     except requests.RequestException as e:
