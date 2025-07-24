@@ -41,10 +41,10 @@ except Exception as e:
     raise
 
 # Default playlists
-DEFAULT_PLAYLISTS = {
-    'hitster_uk': {'id': '2hZhVv7z6cpGcRBEgvlXLz', 'name': 'HITSTER - UK Summer Party'},
-    'hebrew_hits': {'id': '6q2dtkU2I1tR8ZVQI8mian', 'name': 'Hebrew Hits'}
-}
+DEFAULT_PLAYLISTS = [
+    {'id': '2hZhVv7z6cpGcRBEgvlXLz', 'name': 'HITSTER - UK Summer Party'},
+    {'id': '6q2dtkU2I1tR8ZVQI8mian', 'name': 'Hebrew Hits'}
+]
 
 # Get Client Credentials access token
 def get_client_credentials_token():
@@ -119,11 +119,11 @@ def get_playlist_metadata(playlist_id):
         data = response.json()
         name = data.get('name', 'Unknown Playlist')
         result = playlists.update_one(
-            {'_id': ObjectId()},
+            {'playlist_id': playlist_id},
             {'$set': {
                 'playlist_id': playlist_id,
                 'name': name,
-                'expires_at': datetime.utcnow() + timedelta(days=30)  # Changed to 30 days
+                'expires_at': datetime.utcnow() + timedelta(days=30)
             }},
             upsert=True
         )
@@ -289,7 +289,7 @@ def spotify_authorize():
             'state': state,
             'created_at': datetime.utcnow().isoformat(),
             'is_active': False,
-            'user_playlists': list(DEFAULT_PLAYLISTS.values())  # Initialize here
+            'user_playlists': []  # Initialize empty, as playlists are now fetched from hitster.playlists
         }).inserted_id)
         logger.info(f"Authorizing with state: {state}, session_id: {session_id}")
         auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
@@ -342,7 +342,7 @@ def spotify_callback():
                 'tracks_played': [],
                 'is_active': True,
                 'playlist_theme': None,
-                'user_playlists': session.get('user_playlists', list(DEFAULT_PLAYLISTS.values())),
+                'user_playlists': [],  # Empty, as playlists are fetched from hitster.playlists
                 'created_at': datetime.utcnow().isoformat(),
                 'state': None
             }}
@@ -352,12 +352,6 @@ def spotify_callback():
         if not session or not session.get('is_active'):
             logger.error(f"Session {session_id} not updated correctly, session: {session}")
             return redirect(f"{FRONTEND_URL}?error={urlencode({'error': 'Session update failed'})}")
-        if not session.get('user_playlists'):
-            logger.warning(f"Session {session_id} missing user_playlists, setting default")
-            sessions.update_one(
-                {'_id': ObjectId(session_id)},
-                {'$set': {'user_playlists': list(DEFAULT_PLAYLISTS.values())}}
-            )
         logger.info(f"Callback success: session_id={session_id}, state={state}")
         return redirect(f"{FRONTEND_URL}?session_id={session_id}")
     except requests.RequestException as e:
@@ -386,18 +380,14 @@ def add_playlist():
             return jsonify({'error': 'Playlist URL required'}), 400
         url = data['url']
         playlist_id = parse_playlist_url(url)
-        if not playlist_id:
+        if not playlist filosofía
             logger.error(f"Invalid Spotify playlist URL: {url}")
             return jsonify({'error': 'Invalid Spotify playlist URL'}), 400
         name, error = get_playlist_metadata(playlist_id)
         if error:
             logger.error(f"Error fetching playlist metadata: {error}")
             return jsonify({'error': error}), 400
-        result = sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$addToSet': {'user_playlists': {'id': playlist_id, 'name': name}}}
-        )
-        logger.info(f"Added playlist {playlist_id} to session {session_id}, modified: {result.modified_count}")
+        logger.info(f"Added playlist {playlist_id} to playlists collection")
         return jsonify({'id': playlist_id, 'name': name})
     except Exception as e:
         logger.error(f"Error in add_playlist for {session_id}: {e}")
@@ -415,14 +405,11 @@ def remove_playlist():
         if not session:
             logger.error(f"Invalid session_id in remove_playlist: {session_id}")
             return jsonify({'error': 'Invalid session_id'}), 400
-        result = sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$pull': {'user_playlists': {'id': playlist_id}}}
-        )
-        logger.info(f"Removed playlist {playlist_id} from session {session_id}, modified: {result.modified_count}")
-        if result.modified_count == 0:
-            logger.warning(f"Playlist {playlist_id} not found in session {session_id}")
-            return jsonify({'error': 'Playlist not found in session'}), 400
+        # Remove from playlists collection
+        result = playlists.delete_one({'playlist_id': playlist_id})
+        logger.info(f"Removed playlist {playlist_id} from playlists collection, deleted: {result.deleted_count}")
+        if result.deleted_count == 0:
+            logger.warning(f"Playlist {playlist_id} not found in playlists collection")
         return jsonify({'message': 'Playlist removed successfully'})
     except Exception as e:
         logger.error(f"Error in remove_playlist for {session_id}: {e}")
@@ -439,9 +426,13 @@ def get_playlists():
         if not session:
             logger.error(f"Invalid session_id in get_playlists: {session_id}")
             return jsonify({'error': 'Invalid session_id'}), 400
-        playlists = session.get('user_playlists', list(DEFAULT_PLAYLISTS.values()))
-        logger.info(f"Retrieved playlists for session {session_id}: {len(playlists)} playlists")
-        return jsonify(playlists)
+        # Fetch from playlists collection where expires_at > now
+        playlist_cursor = playlists.find({'expires_at': {'$gt': datetime.utcnow()}})
+        custom_playlists = [{'id': p['playlist_id'], 'name': p['name']} for p in playlist_cursor]
+        # Combine with default playlists
+        all_playlists = DEFAULT_PLAYLISTS + [p for p in custom_playlists if p['id'] not in [d['id'] for d in DEFAULT_PLAYLISTS]]
+        logger.info(f"Retrieved {len(all_playlists)} playlists for session {session_id}")
+        return jsonify(all_playlists)
     except Exception as e:
         logger.error(f"Error in get_playlists for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
@@ -464,7 +455,7 @@ def get_session():
             'tracks_played': session.get('tracks_played', []),
             'is_active': session.get('is_active', True),
             'created_at': session.get('created_at'),
-            'user_playlists': session.get('user_playlists', list(DEFAULT_PLAYLISTS.values()))
+            'user_playlists': []  # Empty, as playlists are fetched from hitster.playlists
         })
     except Exception as e:
         logger.error(f"Error in get_session for {session_id}: {e}")
