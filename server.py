@@ -289,7 +289,7 @@ def spotify_authorize():
             'state': state,
             'created_at': datetime.utcnow().isoformat(),
             'is_active': False,
-            'user_playlists': []  # Initialize empty, as playlists are now fetched from hitster.playlists
+            'user_playlists': []  # Initialize empty, as playlists are fetched from hitster.playlists
         }).inserted_id)
         logger.info(f"Authorizing with state: {state}, session_id: {session_id}")
         auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
@@ -380,7 +380,7 @@ def add_playlist():
             return jsonify({'error': 'Playlist URL required'}), 400
         url = data['url']
         playlist_id = parse_playlist_url(url)
-        if not playlist filosofía
+        if not playlist_id:
             logger.error(f"Invalid Spotify playlist URL: {url}")
             return jsonify({'error': 'Invalid Spotify playlist URL'}), 400
         name, error = get_playlist_metadata(playlist_id)
