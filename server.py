@@ -119,11 +119,11 @@ def get_playlist_metadata(playlist_id):
         data = response.json()
         name = data.get('name', 'Unknown Playlist')
         result = playlists.update_one(
-            {'playlist_id': playlist_id},
+            {'_id': ObjectId()},
             {'$set': {
                 'playlist_id': playlist_id,
                 'name': name,
-                'expires_at': datetime.utcnow() + timedelta(days=1)
+                'expires_at': datetime.utcnow() + timedelta(days=30)  # Changed to 30 days
             }},
             upsert=True
         )
