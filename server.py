@@ -342,7 +342,7 @@ def spotify_callback():
                 'tracks_played': [],
                 'is_active': True,
                 'playlist_theme': None,
-                'user_playlists': session.get('user_playlists', list(DEFAULT_PLAYLISTS.values())),  # Preserve existing or set default
+                'user_playlists': session.get('user_playlists', list(DEFAULT_PLAYLISTS.values())),
                 'created_at': datetime.utcnow().isoformat(),
                 'state': None
             }}
@@ -401,6 +401,31 @@ def add_playlist():
         return jsonify({'id': playlist_id, 'name': name})
     except Exception as e:
         logger.error(f"Error in add_playlist for {session_id}: {e}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/spotify/remove-playlist', methods=['POST'])
+def remove_playlist():
+    session_id = request.args.get('session_id')
+    playlist_id = request.args.get('playlist_id')
+    if not session_id or not playlist_id:
+        logger.error(f"Missing session_id or playlist_id in remove_playlist: session_id={session_id}, playlist_id={playlist_id}")
+        return jsonify({'error': 'Session ID and playlist ID required'}), 400
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            logger.error(f"Invalid session_id in remove_playlist: {session_id}")
+            return jsonify({'error': 'Invalid session_id'}), 400
+        result = sessions.update_one(
+            {'_id': ObjectId(session_id)},
+            {'$pull': {'user_playlists': {'id': playlist_id}}}
+        )
+        logger.info(f"Removed playlist {playlist_id} from session {session_id}, modified: {result.modified_count}")
+        if result.modified_count == 0:
+            logger.warning(f"Playlist {playlist_id} not found in session {session_id}")
+            return jsonify({'error': 'Playlist not found in session'}), 400
+        return jsonify({'message': 'Playlist removed successfully'})
+    except Exception as e:
+        logger.error(f"Error in remove_playlist for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/spotify/playlists')
