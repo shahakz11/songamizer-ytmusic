@@ -47,7 +47,7 @@ async def spotify_authorize():
         raise HTTPException(status_code=500, detail="Server configuration error")
     
     session_id = str(ObjectId())
-    await db.sessions.insert_one({
+    db.sessions.insert_one({
         "_id": ObjectId(session_id),
         "is_active": True,
         "created_at": datetime.utcnow(),
@@ -71,7 +71,7 @@ async def spotify_callback(code: str = Query(...), state: str = Query(...)):
         logger.error("Spotify credentials missing")
         raise HTTPException(status_code=500, detail="Server configuration error")
     
-    session = await db.sessions.find_one({"_id": ObjectId(state)})
+    session = db.sessions.find_one({"_id": ObjectId(state)})
     if not session or not session.get("is_active"):
         logger.error(f"Invalid session: {state}")
         raise HTTPException(status_code=400, detail="Invalid session")
@@ -96,7 +96,7 @@ async def spotify_callback(code: str = Query(...), state: str = Query(...)):
     refresh_token = data.get("refresh_token")
     expires_in = data.get("expires_in", 3600)
     
-    await db.sessions.update_one(
+    db.sessions.update_one(
         {"_id": ObjectId(state)},
         {
             "$set": {
@@ -113,7 +113,7 @@ async def spotify_callback(code: str = Query(...), state: str = Query(...)):
 
 @app.get("/api/spotify/playlists")
 async def get_playlists(session_id: str = Query(...)):
-    session = await db.sessions.find_one({"_id": ObjectId(session_id)})
+    session = db.sessions.find_one({"_id": ObjectId(session_id)})
     if not session or not session.get("is_active"):
         logger.error(f"Invalid session: {session_id}")
         raise HTTPException(status_code=400, detail="Invalid session")
@@ -154,7 +154,7 @@ async def refresh_access_token(refresh_token: str, session_id: str):
                 raise HTTPException(status_code=400, detail="Failed to refresh Spotify token")
             access_token = data.get("access_token")
             expires_in = data.get("expires_in", 3600)
-            await db.sessions.update_one(
+            db.sessions.update_one(
                 {"_id": ObjectId(session_id)},
                 {
                     "$set": {
@@ -168,7 +168,7 @@ async def refresh_access_token(refresh_token: str, session_id: str):
 @app.get("/api/spotify/play-track")
 async def play_track(playlist_id: str = Query(...), session_id: str = Query(...)):
     logger.info(f"Received play-track request for playlist {playlist_id}, session {session_id}")
-    session = await db.sessions.find_one({"_id": ObjectId(session_id)})
+    session = db.sessions.find_one({"_id": ObjectId(session_id)})
     if not session or not session.get("is_active"):
         logger.error(f"Invalid or inactive session: {session_id}")
         raise HTTPException(400, "Invalid or inactive session")
@@ -202,7 +202,7 @@ async def play_track(playlist_id: str = Query(...), session_id: str = Query(...)
     tracks_played = session.get("tracks_played", [])
     available_tracks = [t for t in tracks if t["id"] not in tracks_played]
     if not available_tracks:
-        await db.sessions.update_one(
+        db.sessions.update_one(
             {"_id": ObjectId(session_id)}, {"$set": {"tracks_played": []}}
         )
         available_tracks = tracks
@@ -226,7 +226,7 @@ async def play_track(playlist_id: str = Query(...), session_id: str = Query(...)
             logger.info(f"Play request status for session {session_id}: {response.status}")
     
     try:
-        await db.tracks.insert_one({
+        db.tracks.insert_one({
             "spotify_id": track["id"],
             "title": track["name"],
             "artist": ", ".join(a["name"] for a in track["artists"]),
@@ -237,11 +237,11 @@ async def play_track(playlist_id: str = Query(...), session_id: str = Query(...)
             "session_id": session_id,
         })
         
-        result = await db.sessions.update_one(
+        result = db.sessions.update_one(
             {"_id": ObjectId(session_id)},
-            {"$push": {"tracks_played": []}},
+            {"$push": {"tracks_played": track["id"]}},
         )
-        logger.info(f"Played track {track['id']} for session {session_id}, modified: {result}")
+        logger.info(f"Played track {track['id']} for session {session_id}, modified: {result.modified_count}")
     except Exception as e:
         logger.error(f"Error saving track {track['id']} for session {session_id}: {str(e)}")
         raise HTTPException(500, "Failed to save track")
