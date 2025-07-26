@@ -9,6 +9,10 @@ from pymongo import MongoClient
 from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,14 +22,21 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["https://preview--tune-twist-7ca04c74.base44.app", "*"]}})
 
 # Configuration
-CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '2c46aa652c2b4da797b7bd26f4e436d0')
-CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET', 'a65c11eca47346e0bee9ba261d7e3126')
-REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://hitster-randomizer.onrender.com/api/spotify/callback')
+CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
+CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
+REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://preview--tune-twist-7ca04c74.base44.app')
 MONGO_URI = os.getenv('MONGO_URI')
-if not MONGO_URI:
-    raise ValueError("MONGO_URI environment variable not set")
-logger.info(f"Environment: CLIENT_ID={CLIENT_ID}, REDIRECT_URI={REDIRECT_URI}, FRONTEND_URL={FRONTEND_URL}")
+if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, MONGO_URI]):
+    missing = [k for k, v in {
+        'SPOTIFY_CLIENT_ID': CLIENT_ID,
+        'SPOTIFY_CLIENT_SECRET': CLIENT_SECRET,
+        'SPOTIFY_REDIRECT_URI': REDIRECT_URI,
+        'MONGO_URI': MONGO_URI
+    }.items() if not v]
+    logger.error(f"Missing environment variables: {missing}")
+    raise ValueError(f"Missing environment variables: {missing}")
+logger.info(f"Environment: REDIRECT_URI={REDIRECT_URI}, FRONTEND_URL={FRONTEND_URL}")
 
 # MongoDB setup
 try:
@@ -172,7 +183,7 @@ def get_playlist_tracks(playlist_id, session_id):
                 {'_id': ObjectId(session_id)},
                 {'$set': {'tracks_played': []}}
             )
-            logger.info(f"Reset tracks_played for session {session_id} for playlist {playlist_id}, modified: {result.modified_count}}")
+            logger.info(f"Reset tracks_played for session {session_id} for playlist {playlist_id}, modified: {result.modified_count}")
             return tracks
         if not unplayed_tracks:
             logger.info(f"No unplayed tracks for playlist {playlist_id}, Total tracks: {len(tracks)}, Played tracks: {len(played_track_ids)}")
@@ -194,7 +205,6 @@ def get_active_device(session_id):
         if not session.get('spotify_access_token'):
             logger.error(f"No access token for session {session_id}")
             return None, "No access token available"
-        )
         response = requests.get(
             'https://api.spotify.com/v1/me/player/devices',
             headers={'Authorization': f'Bearer {session["spotify_access_token"]}'}
@@ -210,17 +220,17 @@ def get_active_device(session_id):
                 logger.error(f"Failed to refresh access token for session {session_id}")
                 return None, "Failed to refresh access token"
         response.raise_for_status()
-        devices = response.json().json()['get('devices', []) 
+        devices = response.json().get('devices', [])
         for device in devices:
             if device['is_active']:
                 return device['id'], None
         return devices[0]['id'] if devices else None, "No active devices found. Open Spotify and play/pause a track."
     except requests.RequestException as e:
         logger.error(f"Error checking devices for session {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return None, f"Error checking devices: {str(e)}")
+        return None, f"Error checking devices: {str(e)}"
     except Exception as e:
         logger.error(f"Unexpected error in get_active_device for {session_id}: {e}")
-        return None, f"Error checking devices: {str(e)}")
+        return None, f"Error checking devices: {str(e)}"
 
 # Play a track
 def play_track(track_id, session_id):
