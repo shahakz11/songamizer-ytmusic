@@ -46,9 +46,15 @@ try:
     tracks = db['tracks']
     playlists = db['playlists']
     mongo_client.admin.command('ping')  # Test connection
-    logger.info("MongoDB connected successfully")
+    # Create TTL index on tracks.expires_at for 2-hour expiry
+    tracks.create_index(
+        [("expires_at", 1)],
+        expireAfterSeconds=7200,
+        partialFilterExpression={"expires_at": {"$exists": True}}
+    )
+    logger.info("MongoDB connected successfully and TTL index ensured on tracks.expires_at")
 except Exception as e:
-    logger.error(f"MongoDB connection failed: {e}")
+    logger.error(f"MongoDB connection or index creation failed: {e}")
     raise
 
 # Get Client Credentials access token
@@ -526,7 +532,8 @@ def play_next_song(playlist_id):
                 'album': random_track['album']['name'],
                 'playlist_theme': playlist_id,
                 'played_at': datetime.utcnow().isoformat(),
-                'session_id': str(session['_id'])
+                'session_id': str(session['_id']),
+                'expires_at': datetime.utcnow() + timedelta(hours=2)
             })
             result = sessions.update_one(
                 {'_id': ObjectId(session_id)},
