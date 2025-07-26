@@ -38,14 +38,21 @@ if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, MONGO_URI]):
     raise ValueError(f"Missing environment variables: {missing}")
 logger.info(f"Environment: REDIRECT_URI={REDIRECT_URI}, FRONTEND_URL={FRONTEND_URL}")
 
+# Valid icon names for playlists
+VALID_ICONS = [
+    'jukebox', 'boombox', 'microphone', 'bells',
+    'music-note', 'record-player', 'guitar', 'headphones'
+]
+DEFAULT_ICON = 'music-note'
+
 # MongoDB setup
 try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = mongo_client['hitster']
+    mongodb = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = mongodb['hitster']
     sessions = db['sessions']
     tracks = db['tracks']
     playlists = db['playlists']
-    mongo_client.admin.command('ping')  # Test connection
+    mongodb.admin.command('ping')  # Test connection
     # Create TTL index on tracks.expires_at for 2-hour expiry
     tracks.create_index(
         [("expires_at", 1)],
@@ -109,10 +116,10 @@ def refresh_access_token(session_id):
 def get_playlist_metadata(playlist_id):
     cached = playlists.find_one({'playlist_id': playlist_id})
     if cached and cached.get('expires_at') > datetime.utcnow():
-        return cached['name'], None
+        return cached['name'], cached.get('custom_icon', DEFAULT_ICON), None
     token = get_client_credentials_token()
     if not token:
-        return None, "Failed to get client credentials token"
+        return None, None, "Failed to get client credentials token"
     try:
         response = requests.get(
             f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
@@ -121,7 +128,7 @@ def get_playlist_metadata(playlist_id):
         if response.status_code == 401:
             token = get_client_credentials_token()
             if not token:
-                return None, "Failed to refresh client credentials token"
+                return None, None, "Failed to refresh client credentials token"
             response = requests.get(
                 f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
                 headers={'Authorization': f'Bearer {token}'}
@@ -134,15 +141,16 @@ def get_playlist_metadata(playlist_id):
             {'$set': {
                 'playlist_id': playlist_id,
                 'name': name,
+                'custom_icon': DEFAULT_ICON,
                 'expires_at': datetime.utcnow() + timedelta(days=30)
             }},
             upsert=True
         )
         logger.info(f"Updated playlist metadata for {playlist_id}, modified: {result.modified_count}")
-        return name, None
+        return name, DEFAULT_ICON, None
     except requests.RequestException as e:
         logger.error(f"Error fetching playlist {playlist_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return None, str(e)
+        return None, None, str(e)
 
 # Fetch tracks from a playlist
 def get_playlist_tracks(playlist_id, session_id):
@@ -394,12 +402,12 @@ def add_playlist():
         if not playlist_id:
             logger.error(f"Invalid Spotify playlist URL: {url}")
             return jsonify({'error': 'Invalid Spotify playlist URL'}), 400
-        name, error = get_playlist_metadata(playlist_id)
+        name, custom_icon, error = get_playlist_metadata(playlist_id)
         if error:
             logger.error(f"Error fetching playlist metadata: {error}")
             return jsonify({'error': error}), 400
         logger.info(f"Added playlist {playlist_id} to playlists collection")
-        return jsonify({'id': playlist_id, 'name': name})
+        return jsonify({'id': playlist_id, 'name': name, 'custom_icon': custom_icon})
     except Exception as e:
         logger.error(f"Error in add_playlist for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
@@ -426,6 +434,40 @@ def remove_playlist():
         logger.error(f"Error in remove_playlist for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
+@app.route('/api/spotify/update-playlist-icon', methods=['POST'])
+def update_playlist_icon():
+    session_id = request.args.get('session_id')
+    playlist_id = request.args.get('playlist_id')
+    if not session_id or not playlist_id:
+        logger.error(f"Missing session_id or playlist_id in update_playlist_icon: session_id={session_id}, playlist_id={playlist_id}")
+        return jsonify({'error': 'Session ID and playlist ID required'}), 400
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            logger.error(f"Invalid session_id in update_playlist_icon: {session_id}")
+            return jsonify({'error': 'Invalid session_id'}), 400
+        playlist = playlists.find_one({'playlist_id': playlist_id})
+        if not playlist:
+            logger.error(f"Playlist {playlist_id} not found in update_playlist_icon")
+            return jsonify({'error': 'Playlist not found'}), 400
+        data = request.get_json()
+        if not data or 'custom_icon' not in data:
+            logger.error("No custom_icon provided in update_playlist_icon")
+            return jsonify({'error': 'Custom icon name required'}), 400
+        custom_icon = data['custom_icon']
+        if custom_icon not in VALID_ICONS:
+            logger.error(f"Invalid custom_icon in update_playlist_icon: {custom_icon}")
+            return jsonify({'error': f"Invalid icon name. Must be one of: {', '.join(VALID_ICONS)}"}), 400
+        result = playlists.update_one(
+            {'playlist_id': playlist_id},
+            {'$set': {'custom_icon': custom_icon}}
+        )
+        logger.info(f"Updated custom_icon for playlist {playlist_id} to {custom_icon}, modified: {result.modified_count}")
+        return jsonify({'message': 'Playlist icon updated successfully', 'custom_icon': custom_icon})
+    except Exception as e:
+        logger.error(f"Error in update_playlist_icon for {session_id}: {e}")
+        return jsonify({'error': str(e)}), 400
+
 @app.route('/api/spotify/playlists')
 def get_playlists():
     session_id = request.args.get('session_id')
@@ -439,7 +481,14 @@ def get_playlists():
             return jsonify({'error': 'Invalid session_id'}), 400
         # Fetch from playlists collection where expires_at > now
         playlist_cursor = playlists.find({'expires_at': {'$gt': datetime.utcnow()}})
-        custom_playlists = [{'id': p['playlist_id'], 'name': p['name']} for p in playlist_cursor]
+        custom_playlists = [
+            {
+                'id': p['playlist_id'],
+                'name': p['name'],
+                'custom_icon': p.get('custom_icon', DEFAULT_ICON)
+            }
+            for p in playlist_cursor
+        ]
         logger.info(f"Retrieved {len(custom_playlists)} playlists for session {session_id}")
         return jsonify(custom_playlists)
     except Exception as e:
