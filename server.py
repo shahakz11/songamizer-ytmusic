@@ -54,7 +54,7 @@ except Exception as e:
 # Default playlists
 DEFAULT_PLAYLISTS = [
     {'id': '2hZhVv7z6cpGcRBEgvlXLz', 'name': 'HITSTER - UK Summer Party'},
-    {'id': '6i2Qd6OpeRBAzxfscNXeWp', 'name': 'Greatest Songs of All Time'}
+    {'id': '6q2dtkU2I1tR8ZVQI8mian', 'name': 'Hebrew Hits'}
 ]
 
 # Get Client Credentials access token
@@ -556,7 +556,7 @@ def play_next_song(playlist_id):
         logger.error(f"Error in play_next_song for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
-@app.sort('/api/spotify/reset', methods=['POST'])
+@app.route('/api/spotify/reset', methods=['POST'])
 def reset_game():
     session_id = request.args.get('session_id')
     if not session_id:
