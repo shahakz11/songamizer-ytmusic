@@ -10,6 +10,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
 from dotenv import load_dotenv
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -52,6 +53,7 @@ try:
     sessions = db['sessions']
     tracks = db['tracks']
     playlists = db['playlists']
+    playlist_tracks = db['playlist_tracks']  # New collection for caching playlist tracks
     mongodb.admin.command('ping')  # Test connection
     # Create TTL index on tracks.expires_at for 2-hour expiry
     tracks.create_index(
@@ -59,7 +61,9 @@ try:
         expireAfterSeconds=7200,
         partialFilterExpression={"expires_at": {"$exists": True}}
     )
-    logger.info("MongoDB connected successfully and TTL index ensured on tracks.expires_at")
+    # Create index on playlist_id for playlist_tracks
+    playlist_tracks.create_index([("playlist_id", 1)], unique=True)
+    logger.info("MongoDB connected successfully and indexes ensured")
 except Exception as e:
     logger.error(f"MongoDB connection or index creation failed: {e}")
     raise
@@ -143,7 +147,7 @@ def get_playlist_metadata(playlist_id):
                 'name': name,
                 'custom_icon': DEFAULT_ICON,
                 'expires_at': datetime.utcnow() + timedelta(days=30)
-            }},
+ laag            }},
             upsert=True
         )
         logger.info(f"Updated playlist metadata for {playlist_id}, modified: {result.modified_count}")
@@ -152,18 +156,17 @@ def get_playlist_metadata(playlist_id):
         logger.error(f"Error fetching playlist {playlist_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return None, None, str(e)
 
-# Fetch tracks from a playlist
+# Fetch tracks from a playlist with caching
 def get_playlist_tracks(playlist_id, session_id):
-    token = get_client_credentials_token()
-    if not token:
-        logger.error(f"No client credentials token for playlist {playlist_id}")
-        return []
-    try:
-        session = sessions.find_one({'_id': ObjectId(session_id)})
-        if not session:
-            logger.error(f"Session {session_id} not found in get_playlist_tracks")
+    # Check cache
+    cache = playlist_tracks.find_one({'playlist_id': playlist_id})
+    if cache and (datetime.utcnow() - cache['cached_at']).total_seconds() < 300:  # 5 minutes
+        tracks = cache['tracks']
+    else:
+        token = get_client_credentials_token()
+        if not token:
+            logger.error(f"No client credentials token for playlist {playlist_id}")
             return []
-        played_track_ids = session.get('tracks_played', [])
         tracks = []
         offset = 0
         limit = 50
@@ -191,23 +194,29 @@ def get_playlist_tracks(playlist_id, session_id):
             if len(data['items']) < limit:
                 break
             offset += limit
-        unplayed_tracks = [track for track in tracks if track['id'] not in played_track_ids]
-        if not unplayed_tracks and tracks:
-            result = sessions.update_one(
-                {'_id': ObjectId(session_id)},
-                {'$set': {'tracks_played': []}}
-            )
-            logger.info(f"Reset tracks_played for session {session_id} for playlist {playlist_id}, modified: {result.modified_count}")
-            return tracks
-        if not unplayed_tracks:
-            logger.info(f"No unplayed tracks for playlist {playlist_id}, Total tracks: {len(tracks)}, Played tracks: {len(played_track_ids)}")
-        return unplayed_tracks
-    except requests.RequestException as e:
-        logger.error(f"Error fetching tracks for playlist {playlist_id} at offset {offset}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+        # Update cache
+        playlist_tracks.update_one(
+            {'playlist_id': playlist_id},
+            {'$set': {'tracks': tracks, 'cached_at': datetime.utcnow()}},
+            upsert=True
+        )
+    
+    session = sessions.find_one({'_id': ObjectId(session_id)})
+    if not session:
+        logger.error(f"Session {session_id} not found in get_playlist_tracks")
         return []
-    except Exception as e:
-        logger.error(f"Unexpected error in get_playlist_tracks for {session_id}: {e}")
-        return []
+    played_track_ids = session.get('tracks_played', [])
+    unplayed_tracks = [track for track in tracks if track['id'] not in played_track_ids]
+    if not unplayed_tracks and tracks:
+        result = sessions.update_one(
+            {'_id': ObjectId(session_id)},
+            {'$set': {'tracks_played': []}}
+        )
+        logger.info(f"Reset tracks_played for session {session_id} for playlist {playlist_id}, modified: {result.modified_count}")
+        return tracks
+    if not unplayed_tracks:
+        logger.info(f"No unplayed tracks for playlist {playlist_id}, Total tracks: {len(tracks)}, Played tracks: {len(played_track_ids)}")
+    return unplayed_tracks
 
 # Check for active Spotify devices
 def get_active_device(session_id):
@@ -284,6 +293,20 @@ def play_track(track_id, session_id):
     except Exception as e:
         logger.error(f"Unexpected error in play_track for {session_id}: {e}")
         return False, f"Error playing track: {str(e)}"
+
+# Pre-select the next track in the background
+def select_next_track(session_id, playlist_id):
+    try:
+        tracks_list = get_playlist_tracks(playlist_id, session_id)
+        if tracks_list:
+            next_track = random.choice(tracks_list)
+            sessions.update_one(
+                {'_id': ObjectId(session_id)},
+                {'$set': {'next_track': next_track}}
+            )
+            logger.info(f"Pre-selected next track {next_track['id']} for session {session_id}")
+    except Exception as e:
+        logger.error(f"Error selecting next track for session {session_id}: {e}")
 
 # Parse Spotify playlist URL
 def parse_playlist_url(url):
@@ -561,16 +584,28 @@ def play_next_song(playlist_id):
         if not session:
             logger.error(f"Invalid session_id in play_next_song: {session_id}")
             return jsonify({'error': 'Invalid session_id'}), 400
+        # Update playlist_theme
         result = sessions.update_one(
             {'_id': ObjectId(session_id)},
             {'$set': {'playlist_theme': playlist_id}}
         )
         logger.info(f"Updated playlist_theme for session {session_id}, modified: {result.modified_count}")
-        tracks_list = get_playlist_tracks(playlist_id, session_id)
-        if not tracks_list:
-            logger.error(f"No tracks available for playlist {playlist_id}")
-            return jsonify({'error': f'No tracks available for playlist {playlist_id}. Playlist may be empty or inaccessible.'}), 400
-        random_track = random.choice(tracks_list)
+        
+        # Check if next_track is available
+        if 'next_track' in session and session['next_track']:
+            random_track = session['next_track']
+            # Clear next_track
+            sessions.update_one(
+                {'_id': ObjectId(session_id)},
+                {'$unset': {'next_track': ""}}
+            )
+        else:
+            tracks_list = get_playlist_tracks(playlist_id, session_id)
+            if not tracks_list:
+                logger.error(f"No tracks available for playlist {playlist_id}")
+                return jsonify({'error': f'No tracks available for playlist {playlist_id}. Playlist may be empty or inaccessible.'}), 400
+            random_track = random.choice(tracks_list)
+        
         success, error = play_track(random_track['id'], session_id)
         if success:
             tracks.insert_one({
@@ -589,6 +624,10 @@ def play_next_song(playlist_id):
                 {'$push': {'tracks_played': random_track['id']}}
             )
             logger.info(f"Played track {random_track['id']} for session {session_id}, modified: {result.modified_count}")
+            # Start background thread to pre-select next track
+            thread = threading.Thread(target=select_next_track, args=(session_id, playlist_id))
+            thread.daemon = True
+            thread.start()
             return jsonify({
                 'spotify_id': random_track['id'],
                 'title': random_track['name'],
@@ -617,7 +656,7 @@ def reset_game():
             return jsonify({'error': 'Invalid session_id'}), 400
         result = sessions.update_one(
             {'_id': ObjectId(session_id)},
-            {'$set': {'tracks_played': [], 'playlist_theme': None}}
+            {'$set': {'tracks_played': [], 'playlist_theme': None, 'next_track': None}}
         )
         tracks.delete_many({'session_id': session_id})
         logger.info(f"Reset game for session {session_id}, modified: {result.modified_count}")
