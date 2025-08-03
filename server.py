@@ -53,7 +53,7 @@ try:
     tracks = db['tracks']
     playlists = db['playlists']
     playlist_tracks = db['playlist_tracks']  # Collection for caching playlist tracks
-    track_metadata = db['track_metadata']  # New collection for MusicBrainz data
+    track_metadata = db['track_metadata']  # Collection for MusicBrainz data
     mongodb.admin.command('ping')  # Test connection
     # Create TTL index on tracks.expires_at for 2-hour expiry
     tracks.create_index(
@@ -123,36 +123,65 @@ def get_original_release_year(track_name, artist_name, fallback_year):
     # Check cache first
     cached = track_metadata.find_one({'track_name': track_name, 'artist_name': artist_name})
     if cached and cached.get('expires_at') > datetime.utcnow():
+        logger.info(f"Using cached original year for {track_name} by {artist_name}: {cached['original_year']}")
         return cached['original_year']
     
     try:
-        # Query MusicBrainz API
-        query = f'recording:"{track_name}" AND artist:"{artist_name}"'
+        # Query MusicBrainz recordings with fuzzy matching
+        query = f'recording:"{track_name}" artist:"{artist_name}"'
         response = requests.get(
             f'https://musicbrainz.org/ws/2/recording?query={urlencode({"query": query})}&fmt=json',
             headers={'User-Agent': 'HitsterRandomizer/1.0 ( https://hitster-randomizer.onrender.com )'}
         )
         response.raise_for_status()
         data = response.json()
+        logger.debug(f"MusicBrainz response for {track_name} by {artist_name}: {data}")
         
         earliest_year = fallback_year
+        found_valid_year = False
+        
+        # Check recordings for first-release-date
         for recording in data.get('recordings', []):
-            if 'first-release-date' in recording:
+            if 'first-release-date' in recording and recording['first-release-date']:
                 year = int(recording['first-release-date'].split('-')[0])
                 if year < earliest_year:
                     earliest_year = year
+                    found_valid_year = True
         
-        # Cache the result for 30 days
-        track_metadata.update_one(
-            {'track_name': track_name, 'artist_name': artist_name},
-            {'$set': {
-                'track_name': track_name,
-                'artist_name': artist_name,
-                'original_year': earliest_year,
-                'expires_at': datetime.utcnow() + timedelta(days=30)
-            }},
-            upsert=True
-        )
+        # If no valid year found, try release groups
+        if not found_valid_year and data.get('recordings'):
+            recording_id = data['recordings'][0].get('id')
+            if recording_id:
+                response = requests.get(
+                    f'https://musicbrainz.org/ws/2/recording/{recording_id}?inc=release-groups&fmt=json',
+                    headers={'User-Agent': 'HitsterRandomizer/1.0 ( https://hitster-randomizer.onrender.com )'}
+                )
+                response.raise_for_status()
+                release_data = response.json()
+                logger.debug(f"Release group response for {track_name} by {artist_name}: {release_data}")
+                for release_group in release_data.get('release-groups', []):
+                    if 'first-release-date' in release_group and release_group['first-release-date']:
+                        year = int(release_group['first-release-date'].split('-')[0])
+                        if year < earliest_year:
+                            earliest_year = year
+                            found_valid_year = True
+        
+        # Cache only if we found a valid year different from fallback
+        if found_valid_year and earliest_year != fallback_year:
+            track_metadata.update_one(
+                {'track_name': track_name, 'artist_name': artist_name},
+                {'$set': {
+                    'track_name': track_name,
+                    'artist_name': artist_name,
+                    'original_year': earliest_year,
+                    'expires_at': datetime.utcnow() + timedelta(days=30)
+                }},
+                upsert=True
+            )
+            logger.info(f"Cached original year {earliest_year} for {track_name} by {artist_name}")
+        else:
+            logger.warning(f"No valid year found for {track_name} by {artist_name}, using fallback: {fallback_year}")
+        
         return earliest_year
     except Exception as e:
         logger.error(f"Error fetching original year for {track_name} by {artist_name}: {e}")
@@ -336,20 +365,6 @@ def play_track(track_id, session_id):
     except Exception as e:
         logger.error(f"Unexpected error in play_track for {session_id}: {e}")
         return False, f"Error playing track: {str(e)}"
-
-# Pre-select the next track in the background
-def select_next_track(session_id, playlist_id):
-    try:
-        tracks_list = get_playlist_tracks(playlist_id, session_id)
-        if tracks_list:
-            next_track = random.choice(tracks_list)
-            sessions.update_one(
-                {'_id': ObjectId(session_id)},
-                {'$set': {'next_track': next_track}}
-            )
-            logger.info(f"Pre-selected next track {next_track['id']} for session {session_id}")
-    except Exception as e:
-        logger.error(f"Error selecting next track for session {session_id}: {e}")
 
 # Parse Spotify playlist URL
 def parse_playlist_url(url):
