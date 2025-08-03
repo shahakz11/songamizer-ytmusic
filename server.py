@@ -146,8 +146,8 @@ def get_playlist_metadata(playlist_id):
                 'playlist_id': playlist_id,
                 'name': name,
                 'custom_icon': DEFAULT_ICON,
-                'expires_at': datetime.utcnow() + timedelta(days=30)
- laag            }},
+                'expires_at': datetime.utcnow() + timedelta(days=30),
+            }},
             upsert=True
         )
         logger.info(f"Updated playlist metadata for {playlist_id}, modified: {result.modified_count}")
@@ -216,6 +216,7 @@ def get_playlist_tracks(playlist_id, session_id):
         return tracks
     if not unplayed_tracks:
         logger.info(f"No unplayed tracks for playlist {playlist_id}, Total tracks: {len(tracks)}, Played tracks: {len(played_track_ids)}")
+        return unplayed_tracks
     return unplayed_tracks
 
 # Check for active Spotify devices
