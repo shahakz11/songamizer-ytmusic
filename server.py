@@ -10,7 +10,6 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
 from dotenv import load_dotenv
-import threading
 
 # Load environment variables
 load_dotenv()
@@ -53,7 +52,8 @@ try:
     sessions = db['sessions']
     tracks = db['tracks']
     playlists = db['playlists']
-    playlist_tracks = db['playlist_tracks']  # New collection for caching playlist tracks
+    playlist_tracks = db['playlist_tracks']  # Collection for caching playlist tracks
+    track_metadata = db['track_metadata']  # New collection for MusicBrainz data
     mongodb.admin.command('ping')  # Test connection
     # Create TTL index on tracks.expires_at for 2-hour expiry
     tracks.create_index(
@@ -63,6 +63,8 @@ try:
     )
     # Create index on playlist_id for playlist_tracks
     playlist_tracks.create_index([("playlist_id", 1)], unique=True)
+    # Create unique index on track_name and artist_name for track_metadata
+    track_metadata.create_index([("track_name", 1), ("artist_name", 1)], unique=True)
     logger.info("MongoDB connected successfully and indexes ensured")
 except Exception as e:
     logger.error(f"MongoDB connection or index creation failed: {e}")
@@ -115,6 +117,46 @@ def refresh_access_token(session_id):
     except Exception as e:
         logger.error(f"Unexpected error in refresh_access_token for {session_id}: {e}")
         return False
+
+# Fetch original release year from MusicBrainz
+def get_original_release_year(track_name, artist_name, fallback_year):
+    # Check cache first
+    cached = track_metadata.find_one({'track_name': track_name, 'artist_name': artist_name})
+    if cached and cached.get('expires_at') > datetime.utcnow():
+        return cached['original_year']
+    
+    try:
+        # Query MusicBrainz API
+        query = f'recording:"{track_name}" AND artist:"{artist_name}"'
+        response = requests.get(
+            f'https://musicbrainz.org/ws/2/recording?query={urlencode({"query": query})}&fmt=json',
+            headers={'User-Agent': 'HitsterRandomizer/1.0 ( https://hitster-randomizer.onrender.com )'}
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        earliest_year = fallback_year
+        for recording in data.get('recordings', []):
+            if 'first-release-date' in recording:
+                year = int(recording['first-release-date'].split('-')[0])
+                if year < earliest_year:
+                    earliest_year = year
+        
+        # Cache the result for 30 days
+        track_metadata.update_one(
+            {'track_name': track_name, 'artist_name': artist_name},
+            {'$set': {
+                'track_name': track_name,
+                'artist_name': artist_name,
+                'original_year': earliest_year,
+                'expires_at': datetime.utcnow() + timedelta(days=30)
+            }},
+            upsert=True
+        )
+        return earliest_year
+    except Exception as e:
+        logger.error(f"Error fetching original year for {track_name} by {artist_name}: {e}")
+        return fallback_year  # Fallback to Spotify's year
 
 # Fetch playlist metadata
 def get_playlist_metadata(playlist_id):
@@ -585,36 +627,28 @@ def play_next_song(playlist_id):
         if not session:
             logger.error(f"Invalid session_id in play_next_song: {session_id}")
             return jsonify({'error': 'Invalid session_id'}), 400
-        # Update playlist_theme
         result = sessions.update_one(
             {'_id': ObjectId(session_id)},
             {'$set': {'playlist_theme': playlist_id}}
         )
         logger.info(f"Updated playlist_theme for session {session_id}, modified: {result.modified_count}")
-        
-        # Check if next_track is available
-        if 'next_track' in session and session['next_track']:
-            random_track = session['next_track']
-            # Clear next_track
-            sessions.update_one(
-                {'_id': ObjectId(session_id)},
-                {'$unset': {'next_track': ""}}
-            )
-        else:
-            tracks_list = get_playlist_tracks(playlist_id, session_id)
-            if not tracks_list:
-                logger.error(f"No tracks available for playlist {playlist_id}")
-                return jsonify({'error': f'No tracks available for playlist {playlist_id}. Playlist may be empty or inaccessible.'}), 400
-            random_track = random.choice(tracks_list)
-        
+        tracks_list = get_playlist_tracks(playlist_id, session_id)
+        if not tracks_list:
+            logger.error(f"No tracks available for playlist {playlist_id}")
+            return jsonify({'error': f'No tracks available for playlist {playlist_id}. Playlist may be empty or inaccessible.'}), 400
+        random_track = random.choice(tracks_list)
         success, error = play_track(random_track['id'], session_id)
         if success:
+            spotify_year = int(random_track['album']['release_date'].split('-')[0])
+            track_name = random_track['name']
+            artist_name = random_track['artists'][0]['name']
+            original_year = get_original_release_year(track_name, artist_name, spotify_year)
             tracks.insert_one({
                 'spotify_id': random_track['id'],
-                'title': random_track['name'],
-                'artist': random_track['artists'][0]['name'],
-                'release_year': int(random_track['album']['release_date'].split('-')[0]),
+                'title': track_name,
+                'artist': artist_name,
                 'album': random_track['album']['name'],
+                'release_year': original_year,  # Use original year from MusicBrainz
                 'playlist_theme': playlist_id,
                 'played_at': datetime.utcnow().isoformat(),
                 'session_id': str(session['_id']),
@@ -625,15 +659,11 @@ def play_next_song(playlist_id):
                 {'$push': {'tracks_played': random_track['id']}}
             )
             logger.info(f"Played track {random_track['id']} for session {session_id}, modified: {result.modified_count}")
-            # Start background thread to pre-select next track
-            thread = threading.Thread(target=select_next_track, args=(session_id, playlist_id))
-            thread.daemon = True
-            thread.start()
             return jsonify({
                 'spotify_id': random_track['id'],
-                'title': random_track['name'],
-                'artist': random_track['artists'][0]['name'],
-                'release_year': int(random_track['album']['release_date'].split('-')[0]),
+                'title': track_name,
+                'artist': artist_name,
+                'release_year': original_year,  # Return original year
                 'album': random_track['album']['name'],
                 'playlist_theme': playlist_id,
                 'played_at': datetime.utcnow().isoformat()
@@ -657,7 +687,7 @@ def reset_game():
             return jsonify({'error': 'Invalid session_id'}), 400
         result = sessions.update_one(
             {'_id': ObjectId(session_id)},
-            {'$set': {'tracks_played': [], 'playlist_theme': None, 'next_track': None}}
+            {'$set': {'tracks_played': [], 'playlist_theme': None}}
         )
         tracks.delete_many({'session_id': session_id})
         logger.info(f"Reset game for session {session_id}, modified: {result.modified_count}")
