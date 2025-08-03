@@ -47,13 +47,20 @@ DEFAULT_ICON = 'music-note'
 
 # MongoDB setup
 try:
-    mongodb = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongodb = MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=30000,
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        retryWrites=True,
+        w='majority'
+    )
     db = mongodb['hitster']
     sessions = db['sessions']
     tracks = db['tracks']
     playlists = db['playlists']
-    playlist_tracks = db['playlist_tracks']  # Collection for caching playlist tracks
-    track_metadata = db['track_metadata']  # Collection for MusicBrainz data
+    playlist_tracks = db['playlist_tracks']
+    track_metadata = db['track_metadata']
     mongodb.admin.command('ping')  # Test connection
     # Create TTL index on tracks.expires_at for 2-hour expiry
     tracks.create_index(
@@ -120,6 +127,11 @@ def refresh_access_token(session_id):
 
 # Fetch original release year from MusicBrainz
 def get_original_release_year(track_name, artist_name, album_name, fallback_year):
+    # Validate fallback year
+    if fallback_year < 1900 or fallback_year > datetime.utcnow().year:
+        logger.warning(f"Invalid Spotify fallback year {fallback_year} for {track_name} by {artist_name}, using current year")
+        fallback_year = datetime.utcnow().year
+    
     # Check cache first
     cached = track_metadata.find_one({'track_name': track_name, 'artist_name': artist_name})
     if cached and cached.get('expires_at') > datetime.utcnow():
@@ -153,6 +165,29 @@ def get_original_release_year(track_name, artist_name, album_name, fallback_year
                 except ValueError:
                     logger.warning(f"Invalid date format in release for {track_name} by {artist_name}: {release['date']}")
                     continue
+        
+        # Fallback to track-based search if no valid year found
+        if not found_valid_year:
+            query = f'recording:"{track_name}" AND artist:"{artist_name}"'
+            response = requests.get(
+                f'https://musicbrainz.org/ws/2/recording?query={urlencode({"query": query})}&fmt=json',
+                headers={'User-Agent': 'HitsterRandomizer/1.0 ( https://hitster-randomizer.onrender.com )'}
+            )
+            response.raise_for_status()
+            data = response.json()
+            logger.debug(f"MusicBrainz recording fallback response for {track_name} by {artist_name}: {data}")
+            
+            for recording in data.get('recordings', []):
+                if 'first-release-date' in recording and recording['first-release-date']:
+                    try:
+                        year = int(recording['first-release-date'].split('-')[0])
+                        if 1900 <= year <= datetime.utcnow().year:
+                            if year < earliest_year or not found_valid_year:
+                                earliest_year = year
+                                found_valid_year = True
+                    except ValueError:
+                        logger.warning(f"Invalid date format in recording for {track_name} by {artist_name}: {recording['first-release-date']}")
+                        continue
         
         # Cache only if we found a valid year different from fallback
         if found_valid_year and earliest_year != fallback_year:
