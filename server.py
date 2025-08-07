@@ -51,10 +51,22 @@ def select_service():
 
 @app.route('/api/spotify/authorize')
 def spotify_authorize():
-    if not sessions.find_one({"session_id": request.headers.get('X-Session-ID'), "service": "spotify"}):
-        return jsonify({"error": "Spotify service not selected"}), 403
+    session_id = request.headers.get('X-Session-ID')
+    session = sessions.find_one({"session_id": session_id})
+    if not session or session.get("service") != "spotify":
+        return jsonify({"error": "Spotify service not selected or session invalid"}), 403
     auth_url = f"https://accounts.spotify.com/authorize?client_id={os.getenv('SPOTIFY_CLIENT_ID')}&response_type=code&redirect_uri={os.getenv('REDIRECT_URI', 'https://hitster-randomizer.onrender.com/api/spotify/callback')}&scope=user-read-playback-state user-modify-playback-state playlist-read-private"
     return jsonify({"auth_url": auth_url})
+
+@app.route('/api/youtube/authorize')
+def youtube_authorize():
+    session_id = request.headers.get('X-Session-ID')
+    session = sessions.find_one({"session_id": session_id})
+    if not session or session.get("service") != "youtube":
+        return jsonify({"error": "YouTube service not selected or session invalid"}), 403
+    if not YOUTUBE_API_KEY:
+        return jsonify({"error": "YouTube API key not configured"}), 500
+    return jsonify({"status": "authenticated"})  # Placeholder, adjust as needed
 
 @app.route('/api/spotify/callback')
 def spotify_callback():
@@ -62,14 +74,6 @@ def spotify_callback():
     code = request.args.get('code')
     # ... (implement token exchange and session update)
     return jsonify({"status": "success"})
-
-@app.route('/api/youtube/authorize')
-def youtube_authorize():
-    if not sessions.find_one({"session_id": request.headers.get('X-Session-ID'), "service": "youtube"}):
-        return jsonify({"error": "YouTube service not selected"}), 403
-    if not YOUTUBE_API_KEY:
-        return jsonify({"error": "YouTube API key not configured"}), 500
-    return jsonify({"status": "authenticated"})  # Placeholder
 
 @app.route('/api/play-track/<playlist_id>')
 def play_track(playlist_id):
@@ -82,8 +86,7 @@ def play_track(playlist_id):
     retry_count = 0
 
     if service == "spotify":
-        # Placeholder for Spotify URI (requires Web API implementation)
-        track_uri = f"spotify:track:{playlist_id}"  # Example, replace with real logic
+        track_uri = f"spotify:track:{playlist_id}"  # Placeholder, replace with Web API logic
         return jsonify({"service": "spotify", "track_uri": track_uri})
     elif service == "youtube":
         if not YOUTUBE_API_KEY:
@@ -101,7 +104,6 @@ def play_track(playlist_id):
             except Exception as e:
                 retry_count += 1
                 if retry_count == max_retries:
-                    # Suggest next track from playlist_tracks as fallback
                     next_track = playlist_tracks.find_one({"playlist_id": {"$ne": playlist_id}})
                     if next_track:
                         return jsonify({
