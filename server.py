@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import youtube_dl
+import random
 
 # Load environment variables
 load_dotenv()
@@ -77,6 +78,9 @@ def play_track(playlist_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
     service = session.get("service", "spotify")
+    max_retries = 2
+    retry_count = 0
+
     if service == "spotify":
         # Placeholder for Spotify URI (requires Web API implementation)
         track_uri = f"spotify:track:{playlist_id}"  # Example, replace with real logic
@@ -84,12 +88,30 @@ def play_track(playlist_id):
     elif service == "youtube":
         if not YOUTUBE_API_KEY:
             return jsonify({"error": "YouTube API key missing"}), 500
-        with youtube_dl.YoutubeDL({'quiet': True, 'api_key': YOUTUBE_API_KEY}) as ydl:
+        while retry_count < max_retries:
             try:
-                info = ydl.extract_info(f"ytsearch:{playlist_id}", download=False)['entries'][0]
-                return jsonify({"service": "youtube", "url": info['url'], "title": info['title']})
+                with youtube_dl.YoutubeDL({'quiet': True, 'api_key': YOUTUBE_API_KEY}) as ydl:
+                    info = ydl.extract_info(f"ytsearch:{playlist_id}", download=False)['entries'][0]
+                    return jsonify({
+                        "service": "youtube",
+                        "url": info['url'],
+                        "title": info['title'],
+                        "success": True
+                    })
             except Exception as e:
-                return jsonify({"error": f"Failed to fetch YouTube track: {str(e)}"}), 500
+                retry_count += 1
+                if retry_count == max_retries:
+                    # Suggest next track from playlist_tracks as fallback
+                    next_track = playlist_tracks.find_one({"playlist_id": {"$ne": playlist_id}})
+                    if next_track:
+                        return jsonify({
+                            "service": "youtube",
+                            "error": f"Failed after {max_retries} retries: {str(e)}",
+                            "next_track_id": next_track["playlist_id"],
+                            "success": False
+                        })
+                    return jsonify({"error": "No next track available", "success": False}), 500
+                continue
     return jsonify({"error": "Service not supported"}), 400
 
 if __name__ == "__main__":
