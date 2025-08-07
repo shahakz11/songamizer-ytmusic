@@ -47,7 +47,7 @@ def select_service():
         {"$set": {"service": service, "session_id": session_id, "is_active": True}},
         upsert=True
     )
-    return jsonify({"session_id": session_id, "service": service})
+    return jsonify({"session_id": session_id, "service": service, "redirect_url": f"/api/{service}/authorize?service={service}"})
 
 @app.route('/api/spotify/authorize')
 def spotify_authorize():
