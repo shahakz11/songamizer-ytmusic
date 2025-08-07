@@ -43,6 +43,8 @@ if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, YOUTUBE_CLIENT_ID, YOUTUBE_C
     }.items() if not v]
     logger.error(f"Missing environment variables: {missing}")
     raise ValueError(f"Missing environment variables: {missing}")
+if not REDIRECT_URI.startswith('https://'):
+    logger.warning(f"SPOTIFY_REDIRECT_URI ({REDIRECT_URI}) should use HTTPS for security")
 logger.info(f"Environment: SPOTIFY_REDIRECT_URI={REDIRECT_URI}, YOUTUBE_REDIRECT_URI=https://hitster-randomizer.onrender.com/api/youtube_music/callback, FRONTEND_URL={FRONTEND_URL}")
 
 # Valid icon names for playlists
@@ -52,34 +54,39 @@ VALID_ICONS = [
 ]
 DEFAULT_ICON = 'music-note'
 
-# MongoDB setup
-try:
-    mongodb = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=30000,
-        connectTimeoutMS=30000,
-        socketTimeoutMS=30000,
-        retryWrites=True,
-        w='majority'
-    )
-    db = mongodb['hitster']
-    sessions = db['sessions']
-    tracks = db['tracks']
-    playlists = db['playlists']
-    playlist_tracks = db['playlist_tracks']
-    track_metadata = db['track_metadata']
-    mongodb.admin.command('ping')  # Test connection
-    tracks.create_index(
-        [("expires_at", 1)],
-        expireAfterSeconds=7200,
-        partialFilterExpression={"expires_at": {"$exists": True}}
-    )
-    playlist_tracks.create_index([("playlist_id", 1)], unique=True)
-    track_metadata.create_index([("track_name", 1), ("artist_name", 1)], unique=True)
-    logger.info("MongoDB connected successfully and indexes ensured")
-except Exception as e:
-    logger.error(f"MongoDB connection or index creation failed: {e}")
-    raise
+# MongoDB setup (deferred to after fork)
+def init_mongodb():
+    try:
+        mongodb = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            retryWrites=True,
+            w='majority'
+        )
+        db = mongodb['hitster']
+        sessions = db['sessions']
+        tracks = db['tracks']
+        playlists = db['playlists']
+        playlist_tracks = db['playlist_tracks']
+        track_metadata = db['track_metadata']
+        mongodb.admin.command('ping')  # Test connection
+        tracks.create_index(
+            [("expires_at", 1)],
+            expireAfterSeconds=7200,
+            partialFilterExpression={"expires_at": {"$exists": True}}
+        )
+        playlist_tracks.create_index([("playlist_id", 1)], unique=True)
+        track_metadata.create_index([("track_name", 1), ("artist_name", 1)], unique=True)
+        logger.info("MongoDB connected successfully and indexes ensured")
+        return db, sessions, tracks, playlists, playlist_tracks, track_metadata
+    except Exception as e:
+        logger.error(f"MongoDB connection or index creation failed: {e}")
+        raise
+
+# Initialize MongoDB
+db, sessions, tracks, playlists, playlist_tracks, track_metadata = init_mongodb()
 
 # Get Client Credentials access token (Spotify)
 def get_client_credentials_token():
@@ -277,33 +284,39 @@ def retry_get_song(ytmusic, track_id, retries=3):
 # Authentication Endpoints
 @app.route('/api/spotify/authorize')
 def spotify_authorize():
-    session_id = str(ObjectId())
-    redirect_uri = REDIRECT_URI
-    scope = 'user-read-private playlist-read-private user-read-email user-modify-playback-state'
-    params = {
-        'client_id': CLIENT_ID,
-        'response_type': 'code',
-        'redirect_uri': redirect_uri,
-        'scope': scope,
-        'state': session_id
-    }
-    auth_url = f'https://accounts.spotify.com/authorize?{urlencode(params)}'
-    sessions.update_one(
-        {'_id': ObjectId(session_id)},
-        {'$set': {
-            'created_at': datetime.utcnow(),
-            'is_active': True,
-            'service_type': 'spotify'
-        }},
-        upsert=True
-    )
-    logger.info(f"Initiated Spotify auth for session {session_id}")
-    return redirect(auth_url)
+    try:
+        session_id = str(ObjectId())
+        redirect_uri = REDIRECT_URI
+        scope = 'user-read-private playlist-read-private user-read-email user-modify-playback-state'
+        params = {
+            'client_id': CLIENT_ID,
+            'response_type': 'code',
+            'redirect_uri': redirect_uri,
+            'scope': scope,
+            'state': session_id
+        }
+        auth_url = f'https://accounts.spotify.com/authorize?{urlencode(params)}'
+        logger.debug(f"Generated Spotify auth URL: {auth_url}")
+        sessions.update_one(
+            {'_id': ObjectId(session_id)},
+            {'$set': {
+                'created_at': datetime.utcnow(),
+                'is_active': True,
+                'service_type': 'spotify'
+            }},
+            upsert=True
+        )
+        logger.info(f"Initiated Spotify auth for session {session_id}")
+        return redirect(auth_url)
+    except Exception as e:
+        logger.error(f"Error in spotify_authorize: {e}")
+        return jsonify({'error': 'Failed to initiate Spotify authentication'}), 500
 
 @app.route('/api/spotify/callback')
 def spotify_callback():
     code = request.args.get('code')
     session_id = request.args.get('state')
+    logger.debug(f"Spotify callback received: code={code}, session_id={session_id}")
     if not code or not session_id:
         logger.error(f"Missing code or session_id in Spotify callback: code={code}, session_id={session_id}")
         return jsonify({'error': 'Invalid callback parameters'}), 400
@@ -335,7 +348,9 @@ def spotify_callback():
             }}
         )
         logger.info(f"Spotify auth completed for session {session_id}")
-        return redirect(f'{FRONTEND_URL}/game?session_id={session_id}')
+        redirect_url = f'{FRONTEND_URL}/game?session_id={session_id}'
+        logger.debug(f"Redirecting to frontend: {redirect_url}")
+        return redirect(redirect_url)
     except requests.RequestException as e:
         logger.error(f"Spotify callback error for {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
         return jsonify({'error': str(e)}), 400
@@ -379,6 +394,7 @@ def youtube_music_authorize():
 @app.route('/api/youtube_music/callback')
 def youtube_music_callback():
     session_id = request.args.get('state')
+    logger.debug(f"YouTube Music callback received: session_id={session_id}")
     if not session_id:
         logger.error("Missing session_id in YouTube Music callback")
         return jsonify({'error': 'Invalid session_id'}), 400
@@ -414,7 +430,9 @@ def youtube_music_callback():
             }
         )
         logger.info(f"YouTube Music auth completed for session {session_id}")
-        return redirect(f'{FRONTEND_URL}/game?session_id={session_id}')
+        redirect_url = f'{FRONTEND_URL}/game?session_id={session_id}'
+        logger.debug(f"Redirecting to frontend: {redirect_url}")
+        return redirect(redirect_url)
     except Exception as e:
         logger.error(f"YouTube Music callback error for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
