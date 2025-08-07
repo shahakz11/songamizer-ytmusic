@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from ytmusicapi import YTMusic
 from google_auth_oauthlib.flow import InstalledAppFlow
 import time
+import gunicorn
 
 # Load environment variables
 load_dotenv()
@@ -54,8 +55,16 @@ VALID_ICONS = [
 ]
 DEFAULT_ICON = 'music-note'
 
-# MongoDB setup (deferred to after fork)
+# MongoDB setup (deferred to worker process)
+db = None
+sessions = None
+tracks = None
+playlists = None
+playlist_tracks = None
+track_metadata = None
+
 def init_mongodb():
+    global db, sessions, tracks, playlists, playlist_tracks, track_metadata
     try:
         mongodb = MongoClient(
             MONGO_URI,
@@ -80,13 +89,17 @@ def init_mongodb():
         playlist_tracks.create_index([("playlist_id", 1)], unique=True)
         track_metadata.create_index([("track_name", 1), ("artist_name", 1)], unique=True)
         logger.info("MongoDB connected successfully and indexes ensured")
-        return db, sessions, tracks, playlists, playlist_tracks, track_metadata
     except Exception as e:
         logger.error(f"MongoDB connection or index creation failed: {e}")
         raise
 
-# Initialize MongoDB
-db, sessions, tracks, playlists, playlist_tracks, track_metadata = init_mongodb()
+# Initialize MongoDB in each worker process
+def gunicorn_worker_init():
+    init_mongodb()
+
+# Register MongoDB initialization with gunicorn
+gunicorn.SERVER_SOFTWARE = 'gunicorn'  # Ensure gunicorn is detected
+app.before_first_request(gunicorn_worker_init)
 
 # Get Client Credentials access token (Spotify)
 def get_client_credentials_token():
@@ -316,7 +329,11 @@ def spotify_authorize():
 def spotify_callback():
     code = request.args.get('code')
     session_id = request.args.get('state')
-    logger.debug(f"Spotify callback received: code={code}, session_id={session_id}")
+    error = request.args.get('error')
+    logger.debug(f"Spotify callback received: code={code}, session_id={session_id}, error={error}, full_url={request.url}")
+    if error:
+        logger.error(f"Spotify callback error: {error}")
+        return jsonify({'error': error}), 400
     if not code or not session_id:
         logger.error(f"Missing code or session_id in Spotify callback: code={code}, session_id={session_id}")
         return jsonify({'error': 'Invalid callback parameters'}), 400
@@ -394,7 +411,7 @@ def youtube_music_authorize():
 @app.route('/api/youtube_music/callback')
 def youtube_music_callback():
     session_id = request.args.get('state')
-    logger.debug(f"YouTube Music callback received: session_id={session_id}")
+    logger.debug(f"YouTube Music callback received: session_id={session_id}, full_url={request.url}")
     if not session_id:
         logger.error("Missing session_id in YouTube Music callback")
         return jsonify({'error': 'Invalid session_id'}), 400
@@ -742,4 +759,5 @@ def data_delete():
         return jsonify({'error': str(e)}), 400
 
 if __name__ == '__main__':
+    init_mongodb()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
