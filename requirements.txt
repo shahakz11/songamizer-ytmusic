@@ -5,3 +5,4 @@ requests==2.32.3
 pymongo==4.8.0
 gunicorn==23.0.0
 python-dotenv==1.0.1
+youtube-dl==2021.12.17  # Use latest compatible version or yt-dlp
