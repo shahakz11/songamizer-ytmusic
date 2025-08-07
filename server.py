@@ -12,6 +12,7 @@ import logging
 from dotenv import load_dotenv
 from ytmusicapi import YTMusic
 from google_auth_oauthlib.flow import InstalledAppFlow
+import time
 
 # Load environment variables
 load_dotenv()
@@ -130,9 +131,10 @@ def refresh_access_token(session_id):
 
 # Fetch original release year from MusicBrainz
 def get_original_release_year(track_name, artist_name, album_name, fallback_year):
+    time.sleep(1)  # Respect MusicBrainz 1-second rate limit
     if fallback_year and (1900 <= fallback_year <= datetime.utcnow().year):
         logger.info(f"Using valid fallback year {fallback_year} for {track_name} by {artist_name}")
-        return fallback_year  # Use Spotify/YouTube Music year if valid
+        return fallback_year
     cached = track_metadata.find_one({'track_name': track_name, 'artist_name': artist_name})
     if cached and cached.get('expires_at') > datetime.utcnow():
         logger.info(f"Using cached original year for {track_name} by {artist_name}: {cached['original_year']}")
@@ -182,6 +184,11 @@ def get_playlist_tracks(playlist_id, session_id, service_type='spotify'):
         if not session:
             logger.error(f"Invalid session_id in get_playlist_tracks: {session_id}")
             return []
+        cached = playlist_tracks.find_one({'playlist_id': playlist_id, 'service_type': service_type})
+        if cached and cached.get('expires_at') > datetime.utcnow():
+            logger.info(f"Using cached tracks for playlist {playlist_id}")
+            return cached['tracks']
+        tracks = []
         if service_type == 'spotify':
             token = session.get('spotify_access_token')
             if not token or (session.get('token_expires_at') and session['token_expires_at'] < datetime.utcnow()):
@@ -196,15 +203,14 @@ def get_playlist_tracks(playlist_id, session_id, service_type='spotify'):
                 headers=headers
             )
             response.raise_for_status()
-            tracks = response.json().get('items', [])
-            return [track['track'] for track in tracks if track.get('track')]
+            tracks = [track['track'] for track in response.json().get('items', []) if track.get('track')]
         else:  # youtube_music
             ytmusic = YTMusic(auth={
                 'access_token': session.get('youtube_music_access_token'),
                 'refresh_token': session.get('youtube_music_refresh_token')
             })
             playlist = ytmusic.get_playlist(playlist_id, limit=None)
-            return [
+            tracks = [
                 {
                     'id': track['videoId'],
                     'name': track['title'],
@@ -212,6 +218,15 @@ def get_playlist_tracks(playlist_id, session_id, service_type='spotify'):
                     'album': {'name': track.get('album', 'Unknown'), 'release_date': str(track.get('year', ''))}
                 } for track in playlist['tracks'] if track.get('videoId')
             ]
+        playlist_tracks.update_one(
+            {'playlist_id': playlist_id, 'service_type': service_type},
+            {'$set': {
+                'tracks': tracks,
+                'expires_at': datetime.utcnow() + timedelta(days=1)
+            }},
+            upsert=True
+        )
+        return tracks
     except Exception as e:
         logger.error(f"Error fetching tracks for playlist {playlist_id} (service: {service_type}): {e}")
         return []
@@ -239,11 +254,25 @@ def play_track(track_id, session_id):
         if response.status_code in [204, 202]:
             logger.info(f"Successfully played track {track_id} for session {session_id}")
             return True, None
+        error_msg = response.json().get('error', {}).get('message', 'Unknown error')
+        if 'Premium required' in error_msg:
+            logger.error(f"Spotify Premium required for track {track_id}: {response.text}")
+            return False, 'Spotify Premium account required for playback.'
         logger.error(f"Failed to play track {track_id}: {response.text}")
         return False, response.text
     except requests.RequestException as e:
         logger.error(f"Error playing track {track_id} for {session_id}: {e}")
         return False, str(e)
+
+# Retry logic for ytmusicapi
+def retry_get_song(ytmusic, track_id, retries=3):
+    for attempt in range(retries):
+        try:
+            return ytmusic.get_song(track_id)
+        except Exception as e:
+            logger.warning(f"Retry {attempt+1}/{retries} for track {track_id}: {e}")
+            time.sleep(1)
+    raise Exception(f"Failed to fetch track {track_id} after {retries} attempts")
 
 # Authentication Endpoints
 @app.route('/api/spotify/authorize')
@@ -362,15 +391,15 @@ def youtube_music_callback():
         flow = InstalledAppFlow.from_client_config(
             {
                 'web': {
-                'client_id': YOUTUBE_CLIENT_ID,
-                'client_secret': YOUTUBE_CLIENT_SECRET,
-                'redirect_uris': [redirect_uri],
-                'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
-                'token_uri': 'https://oauth2.googleapis.com/token'
-            }
-        },
-        scopes=['https://www.googleapis.com/auth/youtube.readonly']
-    )
+                    'client_id': YOUTUBE_CLIENT_ID,
+                    'client_secret': YOUTUBE_CLIENT_SECRET,
+                    'redirect_uris': [redirect_uri],
+                    'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+                    'token_uri': 'https://oauth2.googleapis.com/token'
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/youtube.readonly']
+        )
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
         sessions.update_one(
@@ -378,7 +407,7 @@ def youtube_music_callback():
             {
                 '$set': {
                     'youtube_music_access_token': credentials.token,
-                    'youtube_music_refresh_token': credentials.token,
+                    'youtube_music_refresh_token': credentials.refresh_token,
                     'token_expires_at': datetime.utcnow() + timedelta(seconds=3600),
                     'service_type': 'youtube_music'
                 }
@@ -535,6 +564,7 @@ def play_next_song(playlist_id):
         album_name = random_track['album']['name']
         fallback_year = int(random_track['album']['release_date'].split('-')[0]) if random_track['album']['release_date'] else datetime.utcnow().year
         original_year = get_original_release_year(track_name, artist_name, album_name, fallback_year)
+        stream_url = None
         if service_type == 'spotify':
             success, error = play_track(track_id, session_id)
             if not success:
@@ -546,7 +576,7 @@ def play_next_song(playlist_id):
                 'refresh_token': session.get('youtube_music_refresh_token')
             })
             try:
-                song_data = ytmusic.get_song(track_id)
+                song_data = retry_get_song(ytmusic, track_id)
                 stream_url = song_data.get('streamingData', {}).get('adaptiveFormats', [{}])[0].get('url')
                 if not stream_url:
                     logger.error(f"No stream URL for YouTube Music track {track_id}")
@@ -634,6 +664,60 @@ def privacy_policy():
     </html>
     """
     return policy
+
+@app.route('/api/data-request', methods=['POST'])
+def data_request():
+    session_id = request.args.get('session_id')
+    if not session_id:
+        logger.error("No session_id provided in data_request")
+        return jsonify({'error': 'Session ID required'}), 400
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            logger.error(f"Invalid session_id in data_request: {session_id}")
+            return jsonify({'error': 'Invalid session_id'}), 400
+        track_data = tracks.find({'session_id': str(session['_id'])})
+        data = {
+            'session': {
+                'session_id': str(session['_id']),
+                'service_type': session.get('service_type'),
+                'created_at': session.get('created_at'),
+                'tracks_played': session.get('tracks_played', [])
+            },
+            'tracks': [
+                {
+                    'track_id': track['track_id'],
+                    'title': track['title'],
+                    'artist': track['artist'],
+                    'album': track['album'],
+                    'release_year': track['release_year']
+                } for track in track_data
+            ]
+        }
+        logger.info(f"Data request fulfilled for session {session_id}")
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Error in data_request for {session_id}: {e}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/data-delete', methods=['POST'])
+def data_delete():
+    session_id = request.args.get('session_id')
+    if not session_id:
+        logger.error("No session_id provided in data_delete")
+        return jsonify({'error': 'Session ID required'}), 400
+    try:
+        session = sessions.find_one({'_id': ObjectId(session_id)})
+        if not session:
+            logger.error(f"Invalid session_id in data_delete: {session_id}")
+            return jsonify({'error': 'Invalid session_id'}), 400
+        sessions.delete_one({'_id': ObjectId(session_id)})
+        tracks.delete_many({'session_id': str(session['_id'])})
+        logger.info(f"Data deleted for session {session_id}")
+        return jsonify({'message': 'User data deleted'})
+    except Exception as e:
+        logger.error(f"Error in data_delete for {session_id}: {e}")
+        return jsonify({'error': str(e)}), 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
