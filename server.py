@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from ytmusicapi import YTMusic
 from google_auth_oauthlib.flow import InstalledAppFlow
 import time
-import gunicorn
 
 # Load environment variables
 load_dotenv()
@@ -55,7 +54,7 @@ VALID_ICONS = [
 ]
 DEFAULT_ICON = 'music-note'
 
-# MongoDB setup (deferred to worker process)
+# MongoDB setup (deferred to gunicorn worker)
 db = None
 sessions = None
 tracks = None
@@ -92,14 +91,6 @@ def init_mongodb():
     except Exception as e:
         logger.error(f"MongoDB connection or index creation failed: {e}")
         raise
-
-# Initialize MongoDB in each worker process
-def gunicorn_worker_init():
-    init_mongodb()
-
-# Register MongoDB initialization with gunicorn
-gunicorn.SERVER_SOFTWARE = 'gunicorn'  # Ensure gunicorn is detected
-app.before_first_request(gunicorn_worker_init)
 
 # Get Client Credentials access token (Spotify)
 def get_client_credentials_token():
@@ -330,18 +321,22 @@ def spotify_callback():
     code = request.args.get('code')
     session_id = request.args.get('state')
     error = request.args.get('error')
-    logger.debug(f"Spotify callback received: code={code}, session_id={session_id}, error={error}, full_url={request.url}")
+    logger.debug(f"Spotify callback received: code={code}, session_id={session_id}, error={error}, full_url={request.url}, headers={dict(request.headers)}")
     if error:
         logger.error(f"Spotify callback error: {error}")
         return jsonify({'error': error}), 400
     if not code or not session_id:
         logger.error(f"Missing code or session_id in Spotify callback: code={code}, session_id={session_id}")
-        return jsonify({'error': 'Invalid callback parameters'}), 400
+        redirect_url = f'{FRONTEND_URL}/game?error=invalid_callback_parameters'
+        logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+        return redirect(redirect_url)
     try:
         session = sessions.find_one({'_id': ObjectId(session_id)})
         if not session:
             logger.error(f"Invalid session_id in Spotify callback: {session_id}")
-            return jsonify({'error': 'Invalid session_id'}), 400
+            redirect_url = f'{FRONTEND_URL}/game?error=invalid_session_id'
+            logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+            return redirect(redirect_url)
         response = requests.post(
             'https://accounts.spotify.com/api/token',
             data={
@@ -354,6 +349,7 @@ def spotify_callback():
         )
         response.raise_for_status()
         data = response.json()
+        logger.debug(f"Spotify token response: {data}")
         expires_in = data.get('expires_in', 3600)
         sessions.update_one(
             {'_id': ObjectId(session_id)},
@@ -370,10 +366,14 @@ def spotify_callback():
         return redirect(redirect_url)
     except requests.RequestException as e:
         logger.error(f"Spotify callback error for {session_id}: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return jsonify({'error': str(e)}), 400
+        redirect_url = f'{FRONTEND_URL}/game?error=token_request_failed'
+        logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+        return redirect(redirect_url)
     except Exception as e:
         logger.error(f"Unexpected error in Spotify callback for {session_id}: {e}")
-        return jsonify({'error': str(e)}), 400
+        redirect_url = f'{FRONTEND_URL}/game?error=unexpected_error'
+        logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+        return redirect(redirect_url)
 
 @app.route('/api/youtube_music/authorize')
 def youtube_music_authorize():
@@ -411,15 +411,19 @@ def youtube_music_authorize():
 @app.route('/api/youtube_music/callback')
 def youtube_music_callback():
     session_id = request.args.get('state')
-    logger.debug(f"YouTube Music callback received: session_id={session_id}, full_url={request.url}")
+    logger.debug(f"YouTube Music callback received: session_id={session_id}, full_url={request.url}, headers={dict(request.headers)}")
     if not session_id:
         logger.error("Missing session_id in YouTube Music callback")
-        return jsonify({'error': 'Invalid session_id'}), 400
+        redirect_url = f'{FRONTEND_URL}/game?error=invalid_session_id'
+        logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+        return redirect(redirect_url)
     try:
         session = sessions.find_one({'_id': ObjectId(session_id)})
         if not session:
             logger.error(f"Invalid session_id in YouTube Music callback: {session_id}")
-            return jsonify({'error': 'Invalid session_id'}), 400
+            redirect_url = f'{FRONTEND_URL}/game?error=invalid_session_id'
+            logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+            return redirect(redirect_url)
         redirect_uri = 'https://hitster-randomizer.onrender.com/api/youtube_music/callback'
         flow = InstalledAppFlow.from_client_config(
             {
@@ -452,7 +456,9 @@ def youtube_music_callback():
         return redirect(redirect_url)
     except Exception as e:
         logger.error(f"YouTube Music callback error for {session_id}: {e}")
-        return jsonify({'error': str(e)}), 400
+        redirect_url = f'{FRONTEND_URL}/game?error=youtube_auth_failed'
+        logger.debug(f"Redirecting to frontend with error: {redirect_url}")
+        return redirect(redirect_url)
 
 # Playlist and Track Endpoints
 @app.route('/api/playlists')
