@@ -4,6 +4,7 @@ from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
 import logging
+import youtube_dl
 
 # Load environment variables
 load_dotenv()
@@ -25,14 +26,8 @@ tracks.create_index("expires_at", expireAfterSeconds=7200, partialFilterExpressi
 playlist_tracks.create_index("playlist_id", unique=True)
 track_metadata.create_index([("track_name", 1), ("artist_name", 1)], unique=True)
 
-# Spotify configuration (existing)
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://hitster-randomizer.onrender.com/api/spotify/callback")
-
-# YouTube Music configuration (unofficial API placeholder)
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")  # To be updated with unofficial API key
-import youtube_dl  # Example library for unofficial access
+# API keys
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -57,12 +52,12 @@ def select_service():
 def spotify_authorize():
     if not sessions.find_one({"session_id": request.headers.get('X-Session-ID'), "service": "spotify"}):
         return jsonify({"error": "Spotify service not selected"}), 403
-    auth_url = f"https://accounts.spotify.com/authorize?client_id={SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=user-read-playback-state user-modify-playback-state playlist-read-private"
+    auth_url = f"https://accounts.spotify.com/authorize?client_id={os.getenv('SPOTIFY_CLIENT_ID')}&response_type=code&redirect_uri={os.getenv('REDIRECT_URI', 'https://hitster-randomizer.onrender.com/api/spotify/callback')}&scope=user-read-playback-state user-modify-playback-state playlist-read-private"
     return jsonify({"auth_url": auth_url})
 
 @app.route('/api/spotify/callback')
 def spotify_callback():
-    # Existing Spotify callback logic
+    # Existing Spotify callback logic (to be implemented)
     code = request.args.get('code')
     # ... (implement token exchange and session update)
     return jsonify({"status": "success"})
@@ -71,10 +66,8 @@ def spotify_callback():
 def youtube_authorize():
     if not sessions.find_one({"session_id": request.headers.get('X-Session-ID'), "service": "youtube"}):
         return jsonify({"error": "YouTube service not selected"}), 403
-    # Unofficial API auth (placeholder)
     if not YOUTUBE_API_KEY:
         return jsonify({"error": "YouTube API key not configured"}), 500
-    # Use youtube_dl or similar to authenticate
     return jsonify({"status": "authenticated"})  # Placeholder
 
 @app.route('/api/play-track/<playlist_id>')
@@ -85,13 +78,18 @@ def play_track(playlist_id):
         return jsonify({"error": "Session not found"}), 404
     service = session.get("service", "spotify")
     if service == "spotify":
-        # Existing Spotify play logic
-        pass
+        # Placeholder for Spotify URI (requires Web API implementation)
+        track_uri = f"spotify:track:{playlist_id}"  # Example, replace with real logic
+        return jsonify({"service": "spotify", "track_uri": track_uri})
     elif service == "youtube":
-        # Unofficial YouTube play logic using youtube_dl
-        with youtube_dl.YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(f"ytsearch:{playlist_id}", download=False)['entries'][0]
-            return jsonify({"url": info['url']})
+        if not YOUTUBE_API_KEY:
+            return jsonify({"error": "YouTube API key missing"}), 500
+        with youtube_dl.YoutubeDL({'quiet': True, 'api_key': YOUTUBE_API_KEY}) as ydl:
+            try:
+                info = ydl.extract_info(f"ytsearch:{playlist_id}", download=False)['entries'][0]
+                return jsonify({"service": "youtube", "url": info['url'], "title": info['title']})
+            except Exception as e:
+                return jsonify({"error": f"Failed to fetch YouTube track: {str(e)}"}), 500
     return jsonify({"error": "Service not supported"}), 400
 
 if __name__ == "__main__":
