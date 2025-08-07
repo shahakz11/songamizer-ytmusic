@@ -362,15 +362,15 @@ def youtube_music_callback():
         flow = InstalledAppFlow.from_client_config(
             {
                 'web': {
-                    'client_id': YOUTUBE_CLIENT_ID,
-                    'client_secret': YOUTUBE_CLIENT_SECRET,
-                    'redirect_uris': [redirect_uri],
-                    'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
-                    'token_uri': 'https://oauth2.googleapis.com/token'
-                }
-            },
-            scopes=['https://www.googleapis.com/auth/youtube.readonly']
-        )
+                'client_id': YOUTUBE_CLIENT_ID,
+                'client_secret': YOUTUBE_CLIENT_SECRET,
+                'redirect_uris': [redirect_uri],
+                'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+                'token_uri': 'https://oauth2.googleapis.com/token'
+            }
+        },
+        scopes=['https://www.googleapis.com/auth/youtube.readonly']
+    )
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
         sessions.update_one(
@@ -378,7 +378,7 @@ def youtube_music_callback():
             {
                 '$set': {
                     'youtube_music_access_token': credentials.token,
-                    'youtube_music_refresh_token': credentials.refresh_token,
+                    'youtube_music_refresh_token': credentials.token,
                     'token_expires_at': datetime.utcnow() + timedelta(seconds=3600),
                     'service_type': 'youtube_music'
                 }
@@ -612,6 +612,28 @@ def reset_game():
 @app.route('/')
 def index():
     return jsonify({'message': 'Songamizer Backend. Use the frontend to interact.'})
+
+@app.route('/privacy')
+def privacy_policy():
+    policy = """
+    <html>
+    <head><title>Songamizer Privacy Policy</title></head>
+    <body>
+    <h1>Songamizer Privacy Policy</h1>
+    <p><strong>Effective Date:</strong> August 7, 2025</p>
+    <p>Songamizer collects and processes the following data:</p>
+    <ul>
+        <li><strong>Authentication Tokens:</strong> Spotify and YouTube Music OAuth tokens for accessing playlists and playback, stored securely in MongoDB with a 2-hour TTL for tracks and 30-day TTL for metadata.</li>
+        <li><strong>Session Data:</strong> Session IDs and playlist selections to manage game state, stored in MongoDB.</li>
+        <li><strong>Usage Data:</strong> Non-personal data (e.g., track plays) to improve gameplay, cached temporarily.</li>
+    </ul>
+    <p>We use this data to provide the Songamizer service, enabling music playback and game functionality. Data is not shared with third parties except as required by Spotify and YouTube APIs. You may revoke access via your Spotify or YouTube account settings.</p>
+    <p>For questions, contact: support@songamizer.app</p>
+    <p>We comply with GDPR and CCPA. You have the right to access, delete, or restrict your data. Email us to exercise these rights.</p>
+    </body>
+    </html>
+    """
+    return policy
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
