@@ -441,7 +441,7 @@ def youtube_music_callback():
 @app.route('/api/playlists')
 def get_playlists():
     session_id = request.args.get('session_id')
-    service_type = request.args.get('service_type', 'spotify')
+    service_type = request.args.get('service_type', 'spotify')  # Default to spotify for FE compatibility
     if not session_id:
         logger.error("No session_id provided in get_playlists")
         return jsonify({'error': 'Session ID required'}), 400
@@ -476,7 +476,7 @@ def get_playlists():
                     'name': playlist['name'],
                     'icon': DEFAULT_ICON
                 })
-            logger.info(f"Retrieved {len(all_playlists)} playlists for session {session_id}")
+            logger.info(f"Retrieved {len(all_playlists)} Spotify playlists for session {session_id}")
             return jsonify(all_playlists)
         else:  # youtube_music
             ytmusic = YTMusic(auth={
@@ -508,16 +508,17 @@ def get_session():
         if not session:
             logger.error(f"Invalid session_id in get_session: {session_id}")
             return jsonify({'error': 'Invalid session_id'}), 400
-        logger.info(f"Retrieved session {session_id}")
-        return jsonify({
+        response = {
             'session_id': str(session['_id']),
             'playlist_theme': session.get('playlist_theme'),
             'tracks_played': session.get('tracks_played', []),
             'is_active': session.get('is_active', True),
             'created_at': session.get('created_at'),
-            'user_playlists': [],
-            'service_type': session.get('service_type', 'spotify')
-        })
+            'user_playlists': []  # Maintain compatibility with existing FE
+        }
+        logger.debug(f"Session response for {session_id}: {response}")
+        logger.info(f"Retrieved session {session_id}")
+        return jsonify(response)
     except Exception as e:
         logger.error(f"Error in get_session for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
@@ -545,8 +546,8 @@ def get_tracks():
                     'album': track['album'],
                     'release_year': track['release_year'],
                     'playlist_theme': track['playlist_theme'],
-                    'played_at': track['played_at'],
-                    'service_type': track['service_type']
+                    'played_at': track['played_at']
+                    # Exclude service_type to maintain FE compatibility
                 })
         logger.info(f"Retrieved {len(track_data)} tracks for session {session_id}")
         return jsonify(track_data)
@@ -557,7 +558,7 @@ def get_tracks():
 @app.route('/api/play-track/<playlist_id>')
 def play_next_song(playlist_id):
     session_id = request.args.get('session_id')
-    service_type = request.args.get('service_type', 'spotify')
+    service_type = request.args.get('service_type', 'spotify')  # Default to spotify for FE compatibility
     if not session_id:
         logger.error("No session_id provided in play_next_song")
         return jsonify({'error': 'Session ID required'}), 400
@@ -620,17 +621,20 @@ def play_next_song(playlist_id):
             {'$push': {'tracks_played': track_id}}
         )
         logger.info(f"Played track {track_id} for session {session_id}, modified: {result.modified_count}")
-        return jsonify({
+        response = {
             'track_id': track_id,
             'title': track_name,
             'artist': artist_name,
             'release_year': original_year,
             'album': album_name,
             'playlist_theme': playlist_id,
-            'played_at': datetime.utcnow().isoformat(),
-            'service_type': service_type,
-            'stream_url': stream_url if service_type == 'youtube_music' else f'spotify:track:{track_id}'
-        })
+            'played_at': datetime.utcnow().isoformat()
+            # Exclude service_type and stream_url for FE compatibility
+        }
+        if service_type == 'youtube_music':
+            response['stream_url'] = stream_url
+        logger.debug(f"Play track response for {session_id}: {response}")
+        return jsonify(response)
     except Exception as e:
         logger.error(f"Error in play_next_song for {session_id} (service: {service_type}): {e}")
         return jsonify({'error': str(e)}), 400
@@ -698,9 +702,9 @@ def data_request():
         data = {
             'session': {
                 'session_id': str(session['_id']),
-                'service_type': session.get('service_type'),
                 'created_at': session.get('created_at'),
                 'tracks_played': session.get('tracks_played', [])
+                # Exclude service_type for FE compatibility
             },
             'tracks': [
                 {
