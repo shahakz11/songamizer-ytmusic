@@ -32,6 +32,12 @@ tracks = db.tracks
 app = Flask(__name__)
 CORS(app)
 
+#Spotify Auth
+@app.route("/api/spotify/authorize")
+def legacy_spotify_auth_redirect():
+    return redirect(url_for("auth_spotify"))
+
+
 # --- YOUTUBE MUSIC MCP HELPERS ---
 def _ytm_headers(token):
     return {'Authorization': f'Bearer {token}'}
