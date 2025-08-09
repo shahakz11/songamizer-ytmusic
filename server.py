@@ -24,7 +24,7 @@ PORT = int(os.getenv('PORT', 8080))
 
 # Mongo setup
 mongo = MongoClient(MONGO_URI)
-db = mongodb['hitster']
+db = mongo['hitster']
 sessions = db.sessions
 playlists = db.playlists
 tracks = db.tracks
