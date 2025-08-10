@@ -21,13 +21,13 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://app--songamizer-d8550c2b.base44.app", "*"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://claude.ai/public/artifacts/3a78fe49-3a6d-463a-b3c0-49b13b2130fd", "*"]}})
 
 # Configuration
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI')
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://app--songamizer-d8550c2b.base44.app')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://claude.ai/public/artifacts/3a78fe49-3a6d-463a-b3c0-49b13b2130fd')
 MONGO_URI = os.getenv('MONGO_URI')
 if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, MONGO_URI]):
     missing = [k for k, v in {
