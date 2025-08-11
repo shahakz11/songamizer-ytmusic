@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Songamizer - Song Randomizer</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <i class="fas fa-music"></i>
+                <div class="header-text">
+                    <h1>Songemizer</h1>
+                    <p>Song Randomizer</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <button class="play-btn" id="playBtn">
+                    <i class="fas fa-play"></i> Play
+                </button>
+                <button class="history-btn" id="historyBtn">
+                    <i class="fas fa-history"></i> History
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Connect Screen -->
+            <div id="connectScreen" class="screen active">
+                <div class="screen-content">
+                    <h1 class="screen-title">Songemizer</h1>
+                    <p class="screen-subtitle">Discover random tracks from curated playlists. No repeats, pure musical adventure.</p>
+                    
+                    <div class="connect-card">
+                        <div class="connect-icon">
+                            <i class="fab fa-spotify"></i>
+                        </div>
+                        <h2>Connect to Spotify</h2>
+                        <p>Link your Spotify Premium account to start playing random tracks from your favorite playlists.</p>
+                        <button class="connect-btn" id="connectSpotifyBtn">
+                            <i class="fab fa-spotify"></i> Connect with Spotify
+                        </button>
+                        <div class="connect-info">
+                            <p>• Spotify Premium required for playbook</p>
+                            <p>• Keep Spotify app open on your device</p>
+                            <p>• Works on desktop, mobile, and web player</p>
+                        </div>
+                        <button class="setup-instructions" id="setupInstructions">Show setup instructions</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Playlist Screen -->
+            <div id="playlistScreen" class="screen">
+                <div class="screen-content">
+                    <h1 class="screen-title">Songemizer</h1>
+                    <p class="screen-subtitle">Discover random tracks from curated playlists. No repeats, pure musical adventure.</p>
+                    
+                    <div class="playlist-container">
+                        <div class="playlist-header">
+                            <h2>Top Playlists</h2>
+                        </div>
+                        <div class="playlist-list" id="playlistList">
+                            <!-- Playlists will be loaded here -->
+                        </div>
+                        <div class="playlist-actions">
+                            <button class="add-playlist-btn" id="addPlaylistBtn">
+                                <i class="fas fa-plus"></i> Add Playlist
+                            </button>
+                            <button class="start-playing-btn" id="startPlayingBtn" disabled>
+                                Start Playing
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Game Screen -->
+            <div id="gameScreen" class="screen">
+                <div class="screen-content">
+                    <h1 class="screen-title">Songemizer</h1>
+                    
+                    <div class="game-container">
+                        <div class="game-card" id="gameCard">
+                            <div class="record-container">
+                                <div class="record spinning" id="record">
+                                    <div class="record-center"></div>
+                                </div>
+                            </div>
+                            <p class="guess-text">Guess the song...</p>
+                        </div>
+                        
+                        <button class="reveal-btn" id="revealBtn">
+                            <i class="fas fa-eye"></i> Reveal Card
+                        </button>
+                        
+                        <div class="game-stats">
+                            <div class="stats-container">
+                                <span class="tracks-played">
+                                    <i class="fas fa-music"></i> <span id="tracksPlayed">1</span> tracks played
+                                </span>
+                                <button class="reset-btn" id="resetBtn">
+                                    <i class="fas fa-redo"></i> Reset Game
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reveal Screen -->
+            <div id="revealScreen" class="screen">
+                <div class="screen-content">
+                    <h1 class="screen-title">Songemizer</h1>
+                    
+                    <div class="reveal-container">
+                        <div class="reveal-card" id="revealCard">
+                            <div class="artist-name" id="artistName">David Guetta</div>
+                            <div class="release-year" id="releaseYear">2010</div>
+                            <div class="song-name" id="songName">Who's That Chick? (feat. Rihanna)</div>
+                        </div>
+                        
+                        <div class="reveal-actions">
+                            <button class="play-next-btn" id="playNextBtn">
+                                <i class="fas fa-play"></i> Play Next
+                            </button>
+                            <button class="spotify-btn" id="spotifyBtn">
+                                <i class="fab fa-spotify"></i> Spotify
+                            </button>
+                        </div>
+                        
+                        <div class="game-stats">
+                            <div class="stats-container">
+                                <span class="tracks-played">
+                                    <i class="fas fa-music"></i> <span id="revealTracksPlayed">1</span> tracks played
+                                </span>
+                                <button class="reset-btn" id="revealResetBtn">
+                                    <i class="fas fa-redo"></i> Reset Game
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Hidden Audio Player -->
+        <audio id="audioPlayer" preload="auto" style="display: none;"></audio>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
