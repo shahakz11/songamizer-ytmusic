@@ -1,6 +1,6 @@
 import os
 import re
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from flask_cors import CORS
 import requests
 import random
@@ -12,6 +12,8 @@ import logging
 from dotenv import load_dotenv
 from ytmusicapi import YTMusic
 import time
+import json
+import secrets
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +23,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 CORS(app, resources={r"/api/*": {"origins": ["https://claude.ai/public/artifacts/3a78fe49-3a6d-463a-b3c0-49b13b2130fd", "*"]}})
 
 # Configuration
@@ -29,6 +32,12 @@ CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://claude.ai/public/artifacts/3a78fe49-3a6d-463a-b3c0-49b13b2130fd')
 MONGO_URI = os.getenv('MONGO_URI')
+
+# Spotify API credentials
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'http://localhost:5000/callback')
+
 if not all([CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, MONGO_URI]):
     missing = [k for k, v in {
         'SPOTIFY_CLIENT_ID': CLIENT_ID,
@@ -46,6 +55,13 @@ VALID_ICONS = [
     'music-note', 'record-player', 'guitar', 'headphones'
 ]
 DEFAULT_ICON = 'music-note'
+
+# Initialize YouTube Music
+ytmusic = YTMusic()
+
+# In-memory storage (replace with database in production)
+user_sessions = {}
+playlists_data = {}
 
 # MongoDB setup
 try:
@@ -295,118 +311,86 @@ def play_track(track_id, session_id):
         logger.error(f"Unexpected error in play_track for {session_id}: {e}")
         return False, f"Error playing track: {str(e)}"
 
+@app.route('/')
+def index():
+    return render_template('index.html')
+
 # Authentication Endpoints
 @app.route('/api/spotify/authorize')
 def spotify_authorize():
-    try:
-        session_id = str(ObjectId())
-        scope = 'user-read-private playlist-read-private user-read-email user-modify-playback-state'
-        params = {
-            'client_id': CLIENT_ID,
-            'response_type': 'code',
-            'redirect_uri': REDIRECT_URI,
-            'scope': scope,
-            'state': session_id
-        }
-        auth_url = f'https://accounts.spotify.com/authorize?{urlencode(params)}'
-        sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$set': {
-                'created_at': datetime.utcnow(),
-                'is_active': True
-            }},
-            upsert=True
-        )
-        logger.info(f"Initiated Spotify auth for session {session_id}")
-        return redirect(auth_url)
-    except Exception as e:
-        logger.error(f"Error in spotify_authorize: {e}")
-        return jsonify({'error': str(e)}), 500
+    state = secrets.token_urlsafe(16)
+    session['oauth_state'] = state
+    
+    params = {
+        'client_id': SPOTIFY_CLIENT_ID,
+        'response_type': 'code',
+        'redirect_uri': SPOTIFY_REDIRECT_URI,
+        'state': state,
+        'scope': 'user-read-private user-read-email playlist-read-private playlist-read-collaborative user-modify-playback-state user-read-playback-state'
+    }
+    
+    auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+    return jsonify({'auth_url': auth_url})
 
-@app.route('/api/spotify/callback')
+@app.route('/callback')
 def spotify_callback():
     code = request.args.get('code')
-    session_id = request.args.get('state')
-    if not code or not session_id:
-        logger.error(f"Missing code or session_id: code={code}, session_id={session_id}")
-        return jsonify({'error': 'Invalid callback parameters'}), 400
-    try:
-        session = sessions.find_one({'_id': ObjectId(session_id)})
-        if not session:
-            logger.error(f"Invalid session_id: {session_id}")
-            return jsonify({'error': 'Invalid session_id'}), 400
-        response = requests.post(
-            'https://accounts.spotify.com/api/token',
-            data={
-                'grant_type': 'authorization_code',
-                'code': code,
-                'redirect_uri': REDIRECT_URI,
-                'client_id': CLIENT_ID,
-                'client_secret': CLIENT_SECRET
-            }
-        )
-        response.raise_for_status()
-        data = response.json()
-        expires_in = data.get('expires_in', 3600)
-        result = sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$set': {
-                'spotify_access_token': data.get('access_token'),
-                'spotify_refresh_token': data.get('refresh_token'),
-                'token_expires_at': datetime.utcnow() + timedelta(seconds=expires_in)
-            }}
-        )
-        logger.info(f"Spotify auth completed for session {session_id}, modified: {result.modified_count}")
-        return redirect(f'{FRONTEND_URL}/game?session_id={session_id}')
-    except requests.RequestException as e:
-        logger.error(f"Spotify callback error: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        logger.error(f"Unexpected error in Spotify callback: {e}")
-        return jsonify({'error': str(e)}), 400
+    state = request.args.get('state')
+    
+    if not code or state != session.get('oauth_state'):
+        return redirect('/?error=auth_failed')
+    
+    # Exchange code for access token
+    token_data = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': SPOTIFY_REDIRECT_URI,
+        'client_id': SPOTIFY_CLIENT_ID,
+        'client_secret': SPOTIFY_CLIENT_SECRET
+    }
+    
+    response = requests.post('https://accounts.spotify.com/api/token', data=token_data)
+    
+    if response.status_code == 200:
+        token_info = response.json()
+        session_id = secrets.token_urlsafe(16)
+        user_sessions[session_id] = token_info
+        
+        return redirect(f'/?session_id={session_id}')
+    else:
+        return redirect('/?error=token_failed')
 
 # Playlist and Track Endpoints
 @app.route('/api/playlists')
 def get_playlists():
-    session_id = request.args.get('session_id')
-    if not session_id:
-        logger.error("No session_id provided in get_playlists")
-        return jsonify({'error': 'Session ID required'}), 400
-    try:
-        session = sessions.find_one({'_id': ObjectId(session_id)})
-        if not session:
-            logger.error(f"Invalid session_id in get_playlists: {session_id}")
-            return jsonify({'error': 'Invalid session_id'}), 400
-        token = session.get('spotify_access_token')
-        if not token or (session.get('token_expires_at') and session['token_expires_at'] < datetime.utcnow()):
-            if not refresh_access_token(session_id):
-                logger.error(f"Failed to refresh token for session {session_id}")
-                return jsonify({'error': 'Authentication required'}), 401
-            session = sessions.find_one({'_id': ObjectId(session_id)})
-            token = session.get('spotify_access_token')
-        headers = {'Authorization': f'Bearer {token}'}
-        response = requests.get('https://api.spotify.com/v1/me/playlists', headers=headers)
-        response.raise_for_status()
-        user_playlists = response.json().get('items', [])
-        curated_playlists = playlists.find()
-        all_playlists = []
-        for playlist in curated_playlists:
-            all_playlists.append({
-                'id': playlist['playlist_id'],
-                'name': playlist['name'],
-                'icon': playlist.get('icon', DEFAULT_ICON)
-            })
-        for playlist in user_playlists:
-            all_playlists.append({
-                'id': playlist['id'],
-                'name': playlist['name'],
-                'icon': DEFAULT_ICON
-            })
-        logger.info(f"Retrieved {len(all_playlists)} playlists for session {session_id}")
-        return jsonify(all_playlists)
-    except Exception as e:
-        logger.error(f"Error in get_playlists for {session_id}: {e}")
-        return jsonify({'error': str(e)}), 400
+    # Return sample playlists for demo
+    sample_playlists = [
+        {'id': '1', 'name': 'מגמיד עשירים - 500 השירים של 5 מעני השירים המחודשים'},
+        {'id': '2', 'name': 'Greatest Pop Songs'},
+        {'id': '3', 'name': 'Hitster Playlist'},
+        {'id': '4', 'name': 'ישראלי כל הזמנים'},
+        {'id': '5', 'name': 'HITSTER : ROCK EDITION'},
+        {'id': '6', 'name': 'HITSTER guilty pleasures'},
+        {'id': '7', 'name': 'Top 100 Greatest Songs of All Time'},
+        {'id': '8', 'name': 'Top 1000 music songs'},
+        {'id': '9', 'name': 'יש בי אהבה'}
+    ]
+    
+    return jsonify({'playlists': sample_playlists})
+
+@app.route('/api/playlists', methods=['POST'])
+def add_playlist():
+    data = request.get_json()
+    url = data.get('url')
+    
+    # Here you would parse the Spotify URL and add the playlist
+    # For demo purposes, we'll just return success
+    return jsonify({'success': True})
+
+@app.route('/api/playlists/<playlist_id>', methods=['DELETE'])
+def remove_playlist(playlist_id):
+    # Here you would remove the playlist from storage
+    return jsonify({'success': True})
 
 @app.route('/api/spotify/session')
 def get_session():
@@ -463,67 +447,49 @@ def get_tracks():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/play-track/<playlist_id>')
-def play_next_song(playlist_id):
-    session_id = request.args.get('session_id')
-    if not session_id:
-        logger.error("No session_id provided in play_next_song")
-        return jsonify({'error': 'Session ID required'}), 400
+def play_track(playlist_id):
+    # Sample track data for demo
+    sample_tracks = [
+        {
+            'name': "Who's That Chick? (feat. Rihanna)",
+            'artist': 'David Guetta',
+            'year': '2010',
+            'spotify_url': 'https://open.spotify.com/track/example',
+            'stream_url': None  # Would be populated with YouTube Music stream URL
+        },
+        {
+            'name': 'Blinding Lights',
+            'artist': 'The Weeknd',
+            'year': '2019',
+            'spotify_url': 'https://open.spotify.com/track/example2',
+            'stream_url': None
+        },
+        {
+            'name': 'Shape of You',
+            'artist': 'Ed Sheeran',
+            'year': '2017',
+            'spotify_url': 'https://open.spotify.com/track/example3',
+            'stream_url': None
+        }
+    ]
+    
+    import random
+    track = random.choice(sample_tracks)
+    
+    # Try to get YouTube Music stream URL
     try:
-        session = sessions.find_one({'_id': ObjectId(session_id)})
-        if not session:
-            logger.error(f"Invalid session_id in play_next_song: {session_id}")
-            return jsonify({'error': 'Invalid session_id'}), 400
-        result = sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$set': {'playlist_theme': playlist_id}}
-        )
-        logger.info(f"Updated playlist_theme for session {session_id}, modified: {result.modified_count}")
-        tracks_list = get_playlist_tracks(playlist_id, session_id)
-        if not tracks_list:
-            logger.error(f"No tracks available for playlist {playlist_id}")
-            return jsonify({'error': f'No tracks available for playlist {playlist_id}. Playlist may be empty or inaccessible.'}), 400
-        random_track = random.choice(tracks_list)
-        track_id = random_track['id']
-        track_name = random_track['name']
-        artist_name = random_track['artists'][0]['name']
-        album_name = random_track['album']['name']
-        fallback_year = int(random_track['album']['release_date'].split('-')[0]) if random_track['album']['release_date'] else datetime.utcnow().year
-        original_year = get_original_release_year(track_name, artist_name, album_name, fallback_year)
-        # Fetch stream URL from ytmusicapi
-        stream_url = get_stream_url(track_name, artist_name)
-        if not stream_url:
-            logger.error(f"Failed to fetch stream URL for {track_name} by {artist_name}")
-            return jsonify({'error': 'Failed to fetch stream URL'}), 400
-        tracks.insert_one({
-            'track_id': track_id,
-            'title': track_name,
-            'artist': artist_name,
-            'album': album_name,
-            'release_year': original_year,
-            'playlist_theme': playlist_id,
-            'played_at': datetime.utcnow().isoformat(),
-            'session_id': str(session['_id']),
-            'expires_at': datetime.utcnow() + timedelta(hours=2),
-            'stream_url': stream_url
-        })
-        result = sessions.update_one(
-            {'_id': ObjectId(session_id)},
-            {'$push': {'tracks_played': track_id}}
-        )
-        logger.info(f"Prepared track {track_id} for session {session_id}, modified: {result.modified_count}")
-        return jsonify({
-            'spotify_id': track_id,
-            'title': track_name,
-            'artist': artist_name,
-            'release_year': original_year,
-            'album': album_name,
-            'playlist_theme': playlist_id,
-            'played_at': datetime.utcnow().isoformat(),
-            'stream_url': stream_url
-        })
+        search_query = f"{track['artist']} {track['name']}"
+        search_results = ytmusic.search(search_query, filter='songs', limit=1)
+        
+        if search_results:
+            video_id = search_results[0]['videoId']
+            # Note: Getting actual stream URL requires additional setup
+            # For demo, we'll use a placeholder
+            track['stream_url'] = f"https://www.youtube.com/watch?v={video_id}"
     except Exception as e:
-        logger.error(f"Error in play_next_song for {session_id}: {e}")
-        return jsonify({'error': str(e)}), 400
+        print(f"Error getting YouTube Music stream: {e}")
+    
+    return jsonify({'track': track})
 
 @app.route('/api/reset', methods=['POST'])
 def reset_game():
@@ -547,9 +513,5 @@ def reset_game():
         logger.error(f"Error in reset_game for {session_id}: {e}")
         return jsonify({'error': str(e)}), 400
 
-@app.route('/')
-def index():
-    return jsonify({'message': 'Songamizer Backend. Use the frontend to interact.'})
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
+    app.run(debug=True, host='0.0.0.0', port=5000)
